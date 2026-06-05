@@ -985,8 +985,8 @@ export function App() {
     <main className="app-shell" aria-labelledby="app-title">
       <header className="top-bar" aria-label="同声传译控制区">
         <div className="brand-block">
-          <p className="eyebrow">AI 同声传译助手</p>
-          <h1 id="app-title">Simultaneous Interpretation</h1>
+          <p className="eyebrow">桌面 AI 同传助手</p>
+          <h1 id="app-title">声桥 LinguaBridge</h1>
         </div>
 
         <form className="control-cluster" aria-label="会话配置">

@@ -1,7 +1,7 @@
 {
   "name": "simultaneous-interpretation",
   "version": "0.1.0",
-  "description": "Desktop AI simultaneous interpretation assistant for real-time bilingual captions.",
+  "description": "Desktop AI interpretation assistant for realtime bilingual captions, floating subtitles, and optional translated speech.",
   "private": true,
   "main": "dist-electron/main.js",
   "scripts": {
