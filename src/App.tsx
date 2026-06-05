@@ -16,6 +16,7 @@ import {
 } from "./language/pairs";
 import { createTranslationClient } from "./translation/client";
 import type { SubtitleSegment, TranslationEvent, TranslationContextItem } from "./translation/types";
+import type { TtsQueueItem, TtsSessionState } from "./tts/types";
 import type {
   AudioSessionState,
   AudioSourceOption,
@@ -67,6 +68,15 @@ const defaultFloatingCaptionState: FloatingCaptionState = {
   updatedAtMs: Date.now()
 };
 
+const initialTtsSession: TtsSessionState = {
+  enabled: false,
+  status: "disabled",
+  queue: [],
+  currentItem: null,
+  spokenIds: [],
+  error: null
+};
+
 function formatFileSize(bytes: number): string {
   if (bytes < 1024 * 1024) {
     return `${Math.max(1, Math.round(bytes / 1024))} KB`;
@@ -91,6 +101,30 @@ function getRevisionReasonLabel(reason: SubtitleSegment["revisionReason"]): stri
   return "初始版本";
 }
 
+function getTtsStatusLabel(status: TtsSessionState["status"]): string {
+  if (status === "speaking") {
+    return "播报中";
+  }
+
+  if (status === "queued") {
+    return "排队中";
+  }
+
+  if (status === "paused") {
+    return "已暂停";
+  }
+
+  if (status === "error") {
+    return "异常";
+  }
+
+  if (status === "idle") {
+    return "待播报";
+  }
+
+  return "已关闭";
+}
+
 function getVolumeFromAnalyser(analyser: AnalyserNode): number {
   const samples = new Uint8Array(analyser.fftSize);
   analyser.getByteTimeDomainData(samples);
@@ -102,6 +136,10 @@ function getVolumeFromAnalyser(analyser: AnalyserNode): number {
   }
 
   return Math.min(1, Math.sqrt(sum / samples.length) * 3);
+}
+
+function supportsSpeechSynthesis(): boolean {
+  return typeof window !== "undefined" && "speechSynthesis" in window && "SpeechSynthesisUtterance" in window;
 }
 
 function isFloatingCaptionWindow(): boolean {
@@ -163,6 +201,7 @@ export function App() {
   const [floatingLayout, setFloatingLayout] = useState<FloatingCaptionLayout>("standard");
   const [floatingPosition, setFloatingPosition] =
     useState<FloatingCaptionPosition>("bottom-right");
+  const [ttsSession, setTtsSession] = useState<TtsSessionState>(initialTtsSession);
 
   const chunkSequenceRef = useRef(0);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -172,6 +211,7 @@ export function App() {
   const asrClientRef = useRef(createStreamingAsrClient(loadAsrConfig()));
   const translationClientRef = useRef(createTranslationClient());
   const subtitleSegmentsRef = useRef<SubtitleSegment[]>([]);
+  const ttsSessionRef = useRef<TtsSessionState>(initialTtsSession);
 
   const selectedSource = useMemo(
     () => sourceOptions.find((option) => option.type === session.sourceType) ?? sourceOptions[0],
@@ -254,6 +294,71 @@ export function App() {
   useEffect(() => {
     appInfo?.updateFloatingCaption?.(floatingCaptionState);
   }, [appInfo, floatingCaptionState]);
+
+  useEffect(() => {
+    ttsSessionRef.current = ttsSession;
+  }, [ttsSession]);
+
+  useEffect(() => {
+    return () => {
+      window.speechSynthesis?.cancel();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!latestSubtitleSegment || !ttsSession.enabled) {
+      return;
+    }
+
+    if (latestSubtitleSegment.status === "partial") {
+      return;
+    }
+
+    const itemId = `${latestSubtitleSegment.id}-${latestSubtitleSegment.revision}`;
+    const alreadySpoken =
+      ttsSession.spokenIds.includes(itemId) ||
+      ttsSession.queue.some((item) => item.id === itemId) ||
+      ttsSession.currentItem?.id === itemId;
+
+    if (alreadySpoken) {
+      return;
+    }
+
+    setTtsSession((current) => ({
+      ...current,
+      status: current.status === "disabled" || current.status === "idle" ? "queued" : current.status,
+      queue: [
+        ...current.queue,
+        {
+          id: itemId,
+          text: latestSubtitleSegment.translatedText,
+          languageCode: latestSubtitleSegment.targetLanguage === "中文" ? "zh-CN" : "en-US",
+          label: `片段 ${latestSubtitleSegment.id.replace("asr-segment-", "#")}`
+        }
+      ],
+      error: null
+    }));
+  }, [latestSubtitleSegment, ttsSession]);
+
+  useEffect(() => {
+    if (!ttsSession.enabled || ttsSession.status === "speaking" || ttsSession.status === "paused") {
+      return;
+    }
+
+    const nextItem = ttsSession.queue[0];
+    if (!nextItem) {
+      if (ttsSession.status !== "idle") {
+        setTtsSession((current) => ({
+          ...current,
+          status: current.enabled ? "idle" : "disabled",
+          currentItem: null
+        }));
+      }
+      return;
+    }
+
+    playTtsItem(nextItem);
+  }, [ttsSession]);
 
   function recordChunk(chunk: NormalizedAudioChunk): void {
     setSession((current) => ({
@@ -383,6 +488,7 @@ export function App() {
     setTranslationEvents([]);
     setSubtitleSegments([]);
     subtitleSegmentsRef.current = [];
+    clearTtsQueue();
   }
 
   function updateLanguagePair(pairId: string): void {
@@ -704,6 +810,115 @@ export function App() {
     }));
   }
 
+  function setTtsEnabled(enabled: boolean): void {
+    if (enabled && !supportsSpeechSynthesis()) {
+      setTtsSession((current) => ({
+        ...current,
+        enabled: false,
+        status: "error",
+        error: "当前运行环境不支持语音播报。"
+      }));
+      return;
+    }
+
+    if (!enabled) {
+      window.speechSynthesis?.cancel();
+      setTtsSession((current) => ({
+        ...current,
+        enabled: false,
+        status: "disabled",
+        queue: [],
+        currentItem: null,
+        error: null
+      }));
+      return;
+    }
+
+    setTtsSession((current) => ({
+      ...current,
+      enabled: true,
+      status: current.queue.length > 0 ? "queued" : "idle",
+      error: null
+    }));
+  }
+
+  function playTtsItem(item: TtsQueueItem): void {
+    if (!supportsSpeechSynthesis()) {
+      setTtsSession((current) => ({
+        ...current,
+        status: "error",
+        error: "当前运行环境不支持语音播报。"
+      }));
+      return;
+    }
+
+    const utterance = new SpeechSynthesisUtterance(item.text);
+    utterance.lang = item.languageCode;
+    utterance.rate = 1;
+    utterance.pitch = 1;
+
+    utterance.onend = () => {
+      setTtsSession((current) => ({
+        ...current,
+        status: current.queue.length > 1 ? "queued" : "idle",
+        queue: current.queue.filter((queuedItem) => queuedItem.id !== item.id),
+        currentItem: null,
+        spokenIds: [...current.spokenIds, item.id].slice(-24),
+        error: null
+      }));
+    };
+
+    utterance.onerror = () => {
+      setTtsSession((current) => ({
+        ...current,
+        status: "error",
+        queue: current.queue.filter((queuedItem) => queuedItem.id !== item.id),
+        currentItem: null,
+        error: "语音播报失败，请稍后重试。"
+      }));
+    };
+
+    setTtsSession((current) => ({
+      ...current,
+      status: "speaking",
+      currentItem: item,
+      queue: current.queue.filter((queuedItem) => queuedItem.id !== item.id),
+      error: null
+    }));
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(utterance);
+  }
+
+  function pauseTts(): void {
+    if (ttsSession.status === "speaking") {
+      window.speechSynthesis?.pause();
+      setTtsSession((current) => ({
+        ...current,
+        status: "paused"
+      }));
+      return;
+    }
+
+    if (ttsSession.status === "paused") {
+      window.speechSynthesis?.resume();
+      setTtsSession((current) => ({
+        ...current,
+        status: current.currentItem ? "speaking" : "queued"
+      }));
+    }
+  }
+
+  function clearTtsQueue(): void {
+    window.speechSynthesis?.cancel();
+    setTtsSession((current) => ({
+      ...current,
+      status: current.enabled ? "idle" : "disabled",
+      queue: [],
+      currentItem: null,
+      error: null
+    }));
+  }
+
   async function openFloatingCaption(): Promise<void> {
     if (!appInfo?.openFloatingCaption) {
       setSession((current) => ({
@@ -762,6 +977,7 @@ export function App() {
     { label: "音量", value: `${Math.round(session.volume * 100)}%` },
     { label: "修订窗口", value: `${RECENT_REVISION_WINDOW} 条` },
     { label: "悬浮窗", value: floatingCaptionVisible ? "已打开" : "未打开" },
+    { label: "语音播报", value: getTtsStatusLabel(ttsSession.status) },
     { label: "语言方向", value: activeLanguagePair.label }
   ];
 
@@ -990,6 +1206,33 @@ export function App() {
               <option value="bottom-right">右下</option>
             </select>
           </div>
+
+          <div className="tts-controls" aria-label="语音播报控制">
+            <label className="tts-toggle">
+              <input
+                type="checkbox"
+                checked={ttsSession.enabled}
+                onChange={(event) => setTtsEnabled(event.target.checked)}
+              />
+              <span>译文播报</span>
+            </label>
+            <button type="button" className="secondary-action" onClick={pauseTts}>
+              {ttsSession.status === "paused" ? "继续播报" : "暂停播报"}
+            </button>
+            <button type="button" className="secondary-action" onClick={clearTtsQueue}>
+              停止播报
+            </button>
+            <div className={`tts-status tts-${ttsSession.status}`}>
+              <span>{getTtsStatusLabel(ttsSession.status)}</span>
+              <strong>
+                {ttsSession.currentItem?.label ??
+                  (ttsSession.queue.length > 0
+                    ? `队列 ${ttsSession.queue.length} 条`
+                    : "暂无队列")}
+              </strong>
+            </div>
+          </div>
+          {ttsSession.error ? <p className="error-message">{ttsSession.error}</p> : null}
 
           <div className="placeholder-row" aria-label="输入源状态">
             <span>统一音频块：16 kHz / mono / 500 ms</span>
