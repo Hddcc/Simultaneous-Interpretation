@@ -16,11 +16,11 @@
 
 ## 3. PR 3 - Audio Source Selection and File Simulation
 
-- [ ] 3.1 Implement the audio source selection model for system audio, microphone, and local file simulation.
-- [ ] 3.2 Implement local audio/video file selection and real-time simulated playback into the shared audio stream contract.
-- [ ] 3.3 Add UI status for selected source, active stream, volume activity, and recoverable source errors.
-- [ ] 3.4 Verify file simulation can produce timestamped audio chunks without calling AI services.
-- [ ] 3.5 Prepare a PR description focused only on source selection and file simulation.
+- [x] 3.1 Implement the audio source selection model for system audio, microphone, and local file simulation.
+- [x] 3.2 Implement local audio/video file selection and real-time simulated playback into the shared audio stream contract.
+- [x] 3.3 Add UI status for selected source, active stream, volume activity, and recoverable source errors.
+- [x] 3.4 Verify file simulation can produce timestamped audio chunks without calling AI services.
+- [x] 3.5 Prepare a PR description focused only on source selection and file simulation.
 
 ## 4. PR 4 - Microphone Capture
 
