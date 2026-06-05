@@ -72,11 +72,11 @@
 
 ## 10. PR 10 - Optional TTS Output
 
-- [ ] 10.1 Add a feature flag or setting for translated speech output.
-- [ ] 10.2 Implement TTS generation for translated segments after subtitle output is stable.
-- [ ] 10.3 Add playback queue handling, pause/stop controls, and visible TTS status.
-- [ ] 10.4 Verify TTS can be disabled without affecting subtitles.
-- [ ] 10.5 Prepare a PR description focused only on optional TTS.
+- [x] 10.1 Add a feature flag or setting for translated speech output.
+- [x] 10.2 Implement TTS generation for translated segments after subtitle output is stable.
+- [x] 10.3 Add playback queue handling, pause/stop controls, and visible TTS status.
+- [x] 10.4 Verify TTS can be disabled without affecting subtitles.
+- [x] 10.5 Prepare a PR description focused only on optional TTS.
 
 ## 11. PR 11 - README, Demo, and Review Deliverables
 
