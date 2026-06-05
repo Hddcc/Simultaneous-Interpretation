@@ -32,11 +32,11 @@
 
 ## 5. PR 5 - System Audio Capture
 
-- [ ] 5.1 Investigate and implement the first supported system audio capture path for the target desktop environment.
-- [ ] 5.2 Convert captured computer playback audio into normalized timestamped audio chunks.
-- [ ] 5.3 Add fallback messaging when system audio capture is unavailable or permission is denied.
-- [ ] 5.4 Verify the app can capture audio from a browser, media player, or meeting app in the target environment.
-- [ ] 5.5 Prepare a PR description focused only on system audio capture and known platform limitations.
+- [x] 5.1 Investigate and implement the first supported system audio capture path for the target desktop environment.
+- [x] 5.2 Convert captured computer playback audio into normalized timestamped audio chunks.
+- [x] 5.3 Add fallback messaging when system audio capture is unavailable or permission is denied.
+- [x] 5.4 Verify the app can capture audio from a browser, media player, or meeting app in the target environment.
+- [x] 5.5 Prepare a PR description focused only on system audio capture and known platform limitations.
 
 ## 6. PR 6 - Realtime ASR Integration
 

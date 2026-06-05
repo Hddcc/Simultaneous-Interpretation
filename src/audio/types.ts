@@ -20,6 +20,11 @@ export interface MicrophoneDevice {
   label: string;
 }
 
+export interface DesktopAudioSource {
+  id: string;
+  name: string;
+}
+
 export interface NormalizedAudioChunk {
   id: string;
   sourceType: AudioSourceType;

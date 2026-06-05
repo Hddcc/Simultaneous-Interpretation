@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   createCapturedMicrophoneChunk,
+  createCapturedSystemAudioChunk,
   createSimulatedChunk,
   formatTimestamp
 } from "./audio/simulator";
@@ -8,6 +9,7 @@ import type {
   AudioSessionState,
   AudioSourceOption,
   AudioSourceType,
+  DesktopAudioSource,
   LocalMediaFile,
   MicrophoneDevice,
   NormalizedAudioChunk
@@ -17,7 +19,7 @@ const sourceOptions: AudioSourceOption[] = [
   {
     type: "system",
     label: "系统音频",
-    description: "面向会议、网课、播放器等电脑正在播放的声音。"
+    description: "选择屏幕或窗口来源，尝试捕获电脑正在播放的声音。"
   },
   {
     type: "microphone",
@@ -68,6 +70,15 @@ function getVolumeFromAnalyser(analyser: AnalyserNode): number {
   return Math.min(1, Math.sqrt(sum / samples.length) * 3);
 }
 
+function createDesktopConstraints(sourceId: string): MediaTrackConstraints {
+  return {
+    mandatory: {
+      chromeMediaSource: "desktop",
+      chromeMediaSourceId: sourceId
+    }
+  } as unknown as MediaTrackConstraints;
+}
+
 export function App() {
   const appInfo = window.simultaneousInterpretation;
   const [session, setSession] = useState<AudioSessionState>(initialSession);
@@ -75,11 +86,13 @@ export function App() {
   const [recentChunks, setRecentChunks] = useState<NormalizedAudioChunk[]>([]);
   const [microphoneDevices, setMicrophoneDevices] = useState<MicrophoneDevice[]>([]);
   const [selectedMicrophoneId, setSelectedMicrophoneId] = useState("");
+  const [desktopSources, setDesktopSources] = useState<DesktopAudioSource[]>([]);
+  const [selectedDesktopSourceId, setSelectedDesktopSourceId] = useState("");
 
   const chunkSequenceRef = useRef(0);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
-  const microphoneTimerRef = useRef<number | null>(null);
+  const captureTimerRef = useRef<number | null>(null);
 
   const selectedSource = useMemo(
     () => sourceOptions.find((option) => option.type === session.sourceType) ?? sourceOptions[0],
@@ -89,6 +102,9 @@ export function App() {
   const selectedMicrophoneLabel =
     microphoneDevices.find((device) => device.deviceId === selectedMicrophoneId)?.label ??
     "默认麦克风";
+
+  const selectedDesktopSourceName =
+    desktopSources.find((source) => source.id === selectedDesktopSourceId)?.name ?? "默认桌面源";
 
   useEffect(() => {
     if (session.status !== "streaming" || session.sourceType !== "file") {
@@ -106,7 +122,7 @@ export function App() {
 
   useEffect(() => {
     return () => {
-      cleanupMicrophoneCapture();
+      cleanupActiveCapture();
     };
   }, []);
 
@@ -135,10 +151,10 @@ export function App() {
     }));
   }
 
-  function cleanupMicrophoneCapture(): void {
-    if (microphoneTimerRef.current !== null) {
-      window.clearInterval(microphoneTimerRef.current);
-      microphoneTimerRef.current = null;
+  function cleanupActiveCapture(): void {
+    if (captureTimerRef.current !== null) {
+      window.clearInterval(captureTimerRef.current);
+      captureTimerRef.current = null;
     }
 
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
@@ -149,11 +165,46 @@ export function App() {
   }
 
   function updateSourceType(type: AudioSourceType): void {
-    cleanupMicrophoneCapture();
+    cleanupActiveCapture();
     resetInputState(type);
 
     if (type === "microphone" && microphoneDevices.length === 0) {
       void refreshMicrophoneDevices();
+    }
+
+    if (type === "system" && desktopSources.length === 0) {
+      void refreshDesktopAudioSources();
+    }
+  }
+
+  async function refreshDesktopAudioSources(): Promise<void> {
+    if (!appInfo?.listDesktopAudioSources) {
+      setSession((current) => ({
+        ...current,
+        sourceType: "system",
+        status: "error",
+        error: "当前运行环境无法枚举桌面音频源。"
+      }));
+      return;
+    }
+
+    try {
+      const sources = await appInfo.listDesktopAudioSources();
+      setDesktopSources(sources);
+      setSelectedDesktopSourceId((current) => current || sources[0]?.id || "");
+      setSession((current) => ({
+        ...current,
+        sourceType: "system",
+        status: sources.length > 0 ? "ready" : "error",
+        error: sources.length > 0 ? null : "没有发现可用的桌面或窗口来源。"
+      }));
+    } catch (error) {
+      setSession((current) => ({
+        ...current,
+        sourceType: "system",
+        status: "error",
+        error: error instanceof Error ? error.message : "桌面音频源枚举失败。"
+      }));
     }
   }
 
@@ -197,6 +248,41 @@ export function App() {
     }
   }
 
+  function startAnalyserCapture(
+    stream: MediaStream,
+    sourceType: "system" | "microphone",
+    sourceLabel: string
+  ): void {
+    const audioContext = new AudioContext({ sampleRate: 16000 });
+    const source = audioContext.createMediaStreamSource(stream);
+    const analyser = audioContext.createAnalyser();
+    analyser.fftSize = 1024;
+    source.connect(analyser);
+
+    mediaStreamRef.current = stream;
+    audioContextRef.current = audioContext;
+
+    setSession((current) => ({
+      ...current,
+      sourceType,
+      status: "streaming",
+      lastChunk: null,
+      chunksProduced: 0,
+      volume: 0,
+      error: null
+    }));
+
+    captureTimerRef.current = window.setInterval(() => {
+      const volume = getVolumeFromAnalyser(analyser);
+      const chunk =
+        sourceType === "microphone"
+          ? createCapturedMicrophoneChunk(chunkSequenceRef.current, volume, sourceLabel)
+          : createCapturedSystemAudioChunk(chunkSequenceRef.current, volume, sourceLabel);
+      chunkSequenceRef.current += 1;
+      recordChunk(chunk);
+    }, 500);
+  }
+
   async function startMicrophoneCapture(): Promise<void> {
     if (!navigator.mediaDevices?.getUserMedia) {
       setSession((current) => ({
@@ -208,7 +294,7 @@ export function App() {
     }
 
     try {
-      cleanupMicrophoneCapture();
+      cleanupActiveCapture();
       chunkSequenceRef.current = 0;
       setRecentChunks([]);
 
@@ -227,37 +313,9 @@ export function App() {
             }
       });
 
-      const audioContext = new AudioContext({ sampleRate: 16000 });
-      const source = audioContext.createMediaStreamSource(stream);
-      const analyser = audioContext.createAnalyser();
-      analyser.fftSize = 1024;
-      source.connect(analyser);
-
-      mediaStreamRef.current = stream;
-      audioContextRef.current = audioContext;
-
-      setSession((current) => ({
-        ...current,
-        sourceType: "microphone",
-        status: "streaming",
-        lastChunk: null,
-        chunksProduced: 0,
-        volume: 0,
-        error: null
-      }));
-
-      microphoneTimerRef.current = window.setInterval(() => {
-        const volume = getVolumeFromAnalyser(analyser);
-        const chunk = createCapturedMicrophoneChunk(
-          chunkSequenceRef.current,
-          volume,
-          selectedMicrophoneLabel
-        );
-        chunkSequenceRef.current += 1;
-        recordChunk(chunk);
-      }, 500);
+      startAnalyserCapture(stream, "microphone", selectedMicrophoneLabel);
     } catch (error) {
-      cleanupMicrophoneCapture();
+      cleanupActiveCapture();
       setSession((current) => ({
         ...current,
         sourceType: "microphone",
@@ -268,8 +326,55 @@ export function App() {
     }
   }
 
+  async function startSystemAudioCapture(): Promise<void> {
+    const sourceId = selectedDesktopSourceId || desktopSources[0]?.id;
+    if (!sourceId) {
+      setSession((current) => ({
+        ...current,
+        sourceType: "system",
+        status: "error",
+        error: "请先刷新并选择一个桌面或窗口来源。"
+      }));
+      return;
+    }
+
+    try {
+      cleanupActiveCapture();
+      chunkSequenceRef.current = 0;
+      setRecentChunks([]);
+
+      const desktopConstraints = createDesktopConstraints(sourceId);
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: desktopConstraints,
+        video: desktopConstraints
+      });
+
+      if (stream.getAudioTracks().length === 0) {
+        stream.getTracks().forEach((track) => track.stop());
+        throw new Error("当前桌面源没有提供可捕获的系统音频。");
+      }
+
+      stream.getVideoTracks().forEach((track) => {
+        track.enabled = false;
+      });
+      startAnalyserCapture(stream, "system", selectedDesktopSourceName);
+    } catch (error) {
+      cleanupActiveCapture();
+      setSession((current) => ({
+        ...current,
+        sourceType: "system",
+        status: "error",
+        volume: 0,
+        error:
+          error instanceof Error
+            ? error.message
+            : "系统音频采集失败，请确认平台权限和来源是否支持音频。"
+      }));
+    }
+  }
+
   async function selectLocalFile(): Promise<void> {
-    cleanupMicrophoneCapture();
+    cleanupActiveCapture();
 
     if (!appInfo?.selectLocalMediaFile) {
       setSession((current) => ({
@@ -301,42 +406,37 @@ export function App() {
   }
 
   async function startSession(): Promise<void> {
+    if (session.sourceType === "system") {
+      await startSystemAudioCapture();
+      return;
+    }
+
     if (session.sourceType === "microphone") {
       await startMicrophoneCapture();
       return;
     }
 
-    if (session.sourceType === "file") {
-      cleanupMicrophoneCapture();
+    cleanupActiveCapture();
 
-      if (!session.selectedFile) {
-        setSession((current) => ({
-          ...current,
-          status: "error",
-          error: "请先选择一个本地音频或视频文件。"
-        }));
-        return;
-      }
-
+    if (!session.selectedFile) {
       setSession((current) => ({
         ...current,
-        status: "streaming",
-        error: null
+        status: "error",
+        error: "请先选择一个本地音频或视频文件。"
       }));
       return;
     }
 
-    cleanupMicrophoneCapture();
     setSession((current) => ({
       ...current,
-      status: "ready",
-      error: "系统音频真实采集将在下一阶段接入，当前已完成输入源选择。"
+      status: "streaming",
+      error: null
     }));
   }
 
   function pauseSession(): void {
-    if (session.sourceType === "microphone") {
-      cleanupMicrophoneCapture();
+    if (session.sourceType === "microphone" || session.sourceType === "system") {
+      cleanupActiveCapture();
     }
 
     setSession((current) => ({
@@ -415,17 +515,45 @@ export function App() {
           <div className="caption-stage" aria-live="polite">
             <p className="source-caption">{selectedSource.description}</p>
             <p className="translated-caption">
-              {session.sourceType === "microphone"
-                ? `当前设备：${selectedMicrophoneLabel}`
-                : session.sourceType === "file" && session.selectedFile
-                  ? `已选择 ${session.selectedFile.name}`
-                  : "选择音频源后，可先用文件模拟或麦克风验证实时输入链路。"}
+              {session.sourceType === "system"
+                ? `当前来源：${selectedDesktopSourceName}`
+                : session.sourceType === "microphone"
+                  ? `当前设备：${selectedMicrophoneLabel}`
+                  : session.selectedFile
+                    ? `已选择 ${session.selectedFile.name}`
+                    : "选择音频源后，可先用文件模拟、麦克风或系统音频验证实时输入链路。"}
             </p>
             {session.error ? <p className="error-message">{session.error}</p> : null}
           </div>
 
           <div className="source-actions" aria-label="音频源操作">
-            {session.sourceType === "microphone" ? (
+            {session.sourceType === "system" ? (
+              <>
+                <button
+                  type="button"
+                  className="secondary-action"
+                  onClick={() => void refreshDesktopAudioSources()}
+                >
+                  刷新来源
+                </button>
+                <select
+                  className="inline-select"
+                  value={selectedDesktopSourceId}
+                  aria-label="选择桌面或窗口来源"
+                  onChange={(event) => setSelectedDesktopSourceId(event.target.value)}
+                >
+                  {desktopSources.length === 0 ? (
+                    <option value="">默认桌面源</option>
+                  ) : (
+                    desktopSources.map((source) => (
+                      <option key={source.id} value={source.id}>
+                        {source.name}
+                      </option>
+                    ))
+                  )}
+                </select>
+              </>
+            ) : session.sourceType === "microphone" ? (
               <>
                 <button
                   type="button"
@@ -464,13 +592,15 @@ export function App() {
           <div className="placeholder-row" aria-label="输入源状态">
             <span>统一音频块：16 kHz / mono / 500 ms</span>
             <span>
-              {session.sourceType === "microphone"
-                ? selectedMicrophoneLabel
-                : session.selectedFile
-                  ? `${session.selectedFile.extension.toUpperCase()} · ${formatFileSize(
-                      session.selectedFile.size
-                    )}`
-                  : "尚未选择文件"}
+              {session.sourceType === "system"
+                ? selectedDesktopSourceName
+                : session.sourceType === "microphone"
+                  ? selectedMicrophoneLabel
+                  : session.selectedFile
+                    ? `${session.selectedFile.extension.toUpperCase()} · ${formatFileSize(
+                        session.selectedFile.size
+                      )}`
+                    : "尚未选择文件"}
             </span>
             <span>
               {session.lastChunk
@@ -498,7 +628,7 @@ export function App() {
                 </div>
                 <p className="history-source">暂无音频块</p>
                 <p className="history-translation">
-                  开始文件模拟或麦克风采集后，这里会显示实时 chunk 元数据。
+                  开始文件模拟、麦克风或系统音频采集后，这里会显示实时 chunk 元数据。
                 </p>
               </article>
             ) : (
