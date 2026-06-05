@@ -48,11 +48,11 @@
 
 ## 7. PR 7 - Bilingual Translation Pipeline
 
-- [ ] 7.1 Implement language pair configuration for English to Chinese and Chinese to English.
-- [ ] 7.2 Implement translation requests for stable ASR segments with recent context.
-- [ ] 7.3 Emit translated subtitle events linked to the original segment IDs.
-- [ ] 7.4 Display translated subtitles prominently with source text as supporting context.
-- [ ] 7.5 Prepare a PR description focused only on bilingual translation.
+- [x] 7.1 Implement language pair configuration for English to Chinese and Chinese to English.
+- [x] 7.2 Implement translation requests for stable ASR segments with recent context.
+- [x] 7.3 Emit translated subtitle events linked to the original segment IDs.
+- [x] 7.4 Display translated subtitles prominently with source text as supporting context.
+- [x] 7.5 Prepare a PR description focused only on bilingual translation.
 
 ## 8. PR 8 - Revision-Aware Subtitle Updates
 
