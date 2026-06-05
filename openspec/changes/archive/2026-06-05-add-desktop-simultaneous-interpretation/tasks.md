@@ -88,8 +88,8 @@
 
 ## 12. PR 12 - Final Verification and Submission Hygiene
 
-- [ ] 12.1 Run the documented verification commands and confirm the app starts from a clean checkout.
-- [ ] 12.2 Check Git history, PR descriptions, commit timing, README completeness, and dependency attribution against the review requirements.
-- [ ] 12.3 Confirm no secrets, local-only paths, or generated junk files are committed.
-- [ ] 12.4 Push the final `main` state and confirm the public GitHub repository is accessible after the allowed deadline.
-- [ ] 12.5 Prepare a final PR or release note summarizing the completed demo state.
+- [x] 12.1 Run the documented verification commands and confirm the app starts from a clean checkout.
+- [x] 12.2 Check Git history, PR descriptions, commit timing, README completeness, and dependency attribution against the review requirements.
+- [x] 12.3 Confirm no secrets, local-only paths, or generated junk files are committed.
+- [x] 12.4 Push the final `main` state and confirm the public GitHub repository is accessible after the allowed deadline.
+- [x] 12.5 Prepare a final PR or release note summarizing the completed demo state.

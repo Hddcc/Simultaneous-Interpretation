@@ -100,8 +100,20 @@ copy .env.example .env
 | `VITE_ASR_MODE` | 当前默认为 `mock`，用于本地流式识别演示 |
 | `VITE_ASR_MODEL` | 当前默认为 `mock-streaming-asr` |
 | `VITE_TRANSLATION_MODEL` | 当前默认为 `mock-bilingual-translator` |
-| `OPENAI_API_KEY` | 后续真实 AI 服务接入预留，当前版本可留空 |
+| `OPENAI_API_KEY` | 使用 OpenAI 文件转写和翻译时填写，模拟模式可留空 |
 | `TTS_MODEL` | 后续云端 TTS 接入预留，当前版本可留空 |
+
+需要使用真实 OpenAI 文件转写和翻译时，可按下面方式配置：
+
+```dotenv
+VITE_AI_PROVIDER=openai
+VITE_ASR_MODE=provider
+VITE_ASR_MODEL=gpt-4o-mini-transcribe
+VITE_TRANSLATION_MODEL=gpt-4.1-mini
+OPENAI_API_KEY=your_openai_api_key
+```
+
+真实 OpenAI 链路当前优先支持本地音频或视频文件。麦克风和系统音频已具备采集入口，实时流式 ASR 仍需要后续补充分片上传和服务会话管理。
 
 真实服务密钥只保存在本地运行环境中，请勿提交到仓库。
 
@@ -138,6 +150,7 @@ docs/pr/           分阶段 PR 描述
 - `vite` 和 `@vitejs/plugin-react`：开发服务器与构建工具。
 - `typescript`：静态类型检查。
 - `concurrently` 和 `wait-on`：本地开发进程编排。
+- OpenAI API：可选的本地文件转写和译文生成服务。
 
 原创实现：
 
@@ -145,6 +158,7 @@ docs/pr/           分阶段 PR 描述
 - preload 安全桥接和桌面来源枚举。
 - 音频源状态模型、文件模拟、麦克风采集和系统音频块转换。
 - 流式 ASR 事件模型和本地模拟 ASR 客户端。
+- Electron 主进程中的 OpenAI 配置读取、文件转写代理和翻译代理。
 - 结构化语言对配置和本地模拟翻译客户端。
 - 双语字幕展示、版本化字幕修订和修订窗口。
 - 悬浮字幕同步、本地译文播报队列和主工作台交互。
