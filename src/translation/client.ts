@@ -23,14 +23,15 @@ const CHINESE_TO_ENGLISH: Record<string, string> = {
 };
 
 function createFallbackTranslation(request: TranslationRequest): string {
-  const contextHint =
-    request.context.length > 0 ? `（已参考 ${request.context.length} 条上下文）` : "";
-
   if (request.languagePair.target.code === "zh-CN") {
-    return `${request.segment.text}${contextHint}`;
+    return request.segment.status === "partial"
+      ? `正在整理译文：${request.segment.text}`
+      : request.segment.text;
   }
 
-  return `${request.segment.text}${contextHint ? ` ${contextHint}` : ""}`;
+  return request.segment.status === "partial"
+    ? `Draft translation: ${request.segment.text}`
+    : request.segment.text;
 }
 
 export function createTranslationClient(): TranslationClient {
@@ -42,17 +43,24 @@ export function createTranslationClient(): TranslationClient {
         dictionary[request.segment.text] ?? createFallbackTranslation(request);
       const latencyMs = 420 + request.context.length * 60;
       const createdAtMs = Date.now();
+      const revisionReason =
+        request.segment.revision === 1
+          ? "initial"
+          : request.segment.status === "final"
+            ? "translation-correction"
+            : "asr-correction";
 
       return {
-        id: `translation-${request.segment.id}-${request.segment.revision}`,
+        id: `translation-${request.segment.id}-${request.segment.status}-${request.segment.revision}`,
         segmentId: request.segment.id,
         sourceText: request.segment.text,
         translatedText,
         languagePairId: request.languagePair.id,
         sourceLanguage: request.languagePair.source.label,
         targetLanguage: request.languagePair.target.label,
-        status: "translated",
+        status: request.segment.status === "final" ? "translated" : "partial",
         revision: request.segment.revision,
+        revisionReason,
         createdAtMs,
         latencyMs,
         contextSize: request.context.length

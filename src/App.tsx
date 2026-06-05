@@ -54,6 +54,8 @@ const initialSession: AudioSessionState = {
   error: null
 };
 
+const RECENT_REVISION_WINDOW = 4;
+
 function formatFileSize(bytes: number): string {
   if (bytes < 1024 * 1024) {
     return `${Math.max(1, Math.round(bytes / 1024))} KB`;
@@ -64,6 +66,18 @@ function formatFileSize(bytes: number): string {
 
 function getSourceLabel(type: AudioSourceType): string {
   return sourceOptions.find((option) => option.type === type)?.label ?? type;
+}
+
+function getRevisionReasonLabel(reason: SubtitleSegment["revisionReason"]): string {
+  if (reason === "asr-correction") {
+    return "原文更新";
+  }
+
+  if (reason === "translation-correction") {
+    return "译文优化";
+  }
+
+  return "初始版本";
 }
 
 function getVolumeFromAnalyser(analyser: AnalyserNode): number {
@@ -198,15 +212,15 @@ export function App() {
         .slice(0, 6);
     });
 
-    publishTranslationEvents(nextSegments.filter((segment) => segment.status === "final"));
+    publishTranslationEvents(nextSegments);
   }
 
-  function publishTranslationEvents(finalSegments: AsrSegment[]): void {
-    if (finalSegments.length === 0) {
+  function publishTranslationEvents(changedSegments: AsrSegment[]): void {
+    if (changedSegments.length === 0) {
       return;
     }
 
-    const nextEvents = finalSegments.map((segment) =>
+    const nextEvents = changedSegments.map((segment) =>
       translationClientRef.current.translate({
         segment,
         languagePair: languagePairRef.current,
@@ -225,11 +239,27 @@ export function App() {
       const byId = new Map(current.map((segment) => [segment.id, segment]));
 
       nextEvents.forEach((event) => {
-        const asrSegment = finalSegments.find((segment) => segment.id === event.segmentId);
+        const asrSegment = changedSegments.find((segment) => segment.id === event.segmentId);
 
         if (!asrSegment) {
           return;
         }
+
+        const existing = byId.get(event.segmentId);
+        const currentIndex = current.findIndex((segment) => segment.id === event.segmentId);
+        const canRevise =
+          !existing || (currentIndex >= 0 && currentIndex < RECENT_REVISION_WINDOW);
+
+        if (existing && !canRevise) {
+          return;
+        }
+
+        const revision = existing ? existing.revision + 1 : event.revision;
+        const status = existing
+          ? "revised"
+          : asrSegment.status === "final"
+            ? "final"
+            : "partial";
 
         byId.set(event.segmentId, {
           id: event.segmentId,
@@ -237,15 +267,17 @@ export function App() {
           translatedText: event.translatedText,
           sourceLanguage: event.sourceLanguage,
           targetLanguage: event.targetLanguage,
-          status: event.status,
-          revision: event.revision,
+          status,
+          revision,
+          revisionReason: existing ? event.revisionReason : "initial",
           startedAtMs: asrSegment.startedAtMs,
           endedAtMs: asrSegment.endedAtMs,
           updatedAtMs: event.createdAtMs,
           asrLatencyMs: asrSegment.latencyMs,
           translationLatencyMs: event.latencyMs,
           totalLatencyMs: asrSegment.latencyMs + event.latencyMs,
-          contextSize: event.contextSize
+          contextSize: event.contextSize,
+          revised: Boolean(existing)
         });
       });
 
@@ -599,6 +631,7 @@ export function App() {
           : "等待字幕"
     },
     { label: "音量", value: `${Math.round(session.volume * 100)}%` },
+    { label: "修订窗口", value: `${RECENT_REVISION_WINDOW} 条` },
     { label: "语言方向", value: activeLanguagePair.label }
   ];
 
@@ -670,7 +703,11 @@ export function App() {
                   ? latestAsrSegment.text
                 : selectedSource.description}
             </p>
-            <p className="translated-caption">
+            <p
+              className={`translated-caption ${
+                latestSubtitleSegment?.revised ? "caption-revised" : ""
+              }`}
+            >
               {latestSubtitleSegment
                 ? latestSubtitleSegment.translatedText
                 : latestAsrSegment
@@ -685,7 +722,15 @@ export function App() {
             </p>
             {latestSubtitleSegment || latestAsrSegment ? (
               <div className="asr-detail-row" aria-label="识别事件状态">
-                <span>{latestSubtitleSegment ? "Translated" : "ASR"}</span>
+                <span>
+                  {latestSubtitleSegment
+                    ? latestSubtitleSegment.status === "partial"
+                      ? "Partial"
+                      : latestSubtitleSegment.revised
+                        ? "已修订"
+                        : "Translated"
+                    : "ASR"}
+                </span>
                 <span>
                   {latestSubtitleSegment
                     ? `${latestSubtitleSegment.sourceLanguage} -> ${latestSubtitleSegment.targetLanguage}`
@@ -702,9 +747,12 @@ export function App() {
                 </span>
                 <span>
                   {latestSubtitleSegment
-                    ? `${latestSubtitleSegment.totalLatencyMs} ms`
+                    ? `版本 ${latestSubtitleSegment.revision}`
                     : `${latestAsrSegment?.latencyMs ?? 0} ms`}
                 </span>
+                {latestSubtitleSegment ? (
+                  <span>{latestSubtitleSegment.totalLatencyMs} ms</span>
+                ) : null}
               </div>
             ) : null}
             {session.error ? <p className="error-message">{session.error}</p> : null}
@@ -817,18 +865,27 @@ export function App() {
               </article>
             ) : (
               subtitleSegments.map((segment) => (
-                <article className="history-item" key={segment.id}>
+                <article
+                  className={`history-item ${segment.revised ? "history-item-revised" : ""}`}
+                  key={segment.id}
+                >
                   <div className="history-meta">
                     <time>{formatTimestamp(segment.startedAtMs)}</time>
-                    <span>{`${segment.sourceLanguage} -> ${segment.targetLanguage}`}</span>
+                    <span>
+                      {segment.revised
+                        ? "已修订"
+                        : segment.status === "partial"
+                          ? "临时字幕"
+                          : `${segment.sourceLanguage} -> ${segment.targetLanguage}`}
+                    </span>
                   </div>
                   <p className="history-source">{segment.sourceText}</p>
                   <p className="history-translation">
                     {segment.translatedText}
                   </p>
                   <p className="history-footnote">
-                    版本 {segment.revision} · 上下文 {segment.contextSize} · 延迟{" "}
-                    {segment.totalLatencyMs} ms
+                    版本 {segment.revision} · {getRevisionReasonLabel(segment.revisionReason)} ·
+                    上下文 {segment.contextSize} · 延迟 {segment.totalLatencyMs} ms
                   </p>
                 </article>
               ))
