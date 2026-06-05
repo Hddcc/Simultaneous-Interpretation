@@ -13,7 +13,6 @@
 - [功能亮点](#功能亮点)
 - [快速开始](#快速开始)
 - [使用指南](#使用指南)
-- [演示材料](#演示材料)
 - [配置说明](#配置说明)
 - [技术架构](#技术架构)
 - [依赖与原创实现](#依赖与原创实现)
@@ -36,7 +35,6 @@
 | 字幕自动修订 | 最近字幕会随识别和翻译结果更新而原地修正 |
 | 悬浮字幕窗口 | 支持紧凑、标准、宽屏尺寸和四个屏幕角落位置 |
 | 译文语音播报 | 稳定译文可进入本地语音播报队列，支持暂停和停止 |
-| 交付材料 | 提供中文 README、演示脚本、视频提交入口和依赖归属说明 |
 
 ## 快速开始
 
@@ -86,23 +84,6 @@ npm start
 
 勾选“译文播报”后，稳定译文会进入本地语音播报队列。用户可以暂停、继续或停止播报；关闭译文播报会清空队列，字幕显示和悬浮字幕继续工作。
 
-## 演示材料
-
-- 演示脚本：[docs/demo/demo-script.md](docs/demo/demo-script.md)
-- 视频提交入口：[docs/demo/video-submission.md](docs/demo/video-submission.md)
-- 依赖与原创功能说明：[docs/review/dependencies-and-originality.md](docs/review/dependencies-and-originality.md)
-
-演示建议覆盖：
-
-1. 文件模拟实时输入。
-2. 英语转中文字幕。
-3. 中文转英语字幕。
-4. 字幕修订与历史记录。
-5. 悬浮字幕窗口。
-6. 可选译文语音播报。
-
-真实演示视频需要在桌面环境中录制。录制完成后，可将视频文件放在 `docs/demo/` 目录，或在 `docs/demo/video-submission.md` 填写公开可访问的视频链接。
-
 ## 配置说明
 
 应用默认使用本地模拟 ASR 和模拟翻译。需要调整配置时，请复制 `.env.example` 为 `.env`：
@@ -119,7 +100,8 @@ copy .env.example .env
 | `VITE_ASR_MODE` | 当前默认为 `mock`，用于本地流式识别演示 |
 | `VITE_ASR_MODEL` | 当前默认为 `mock-streaming-asr` |
 | `VITE_TRANSLATION_MODEL` | 当前默认为 `mock-bilingual-translator` |
-| `OPENAI_API_KEY` | 预留给后续真实 AI 服务接入 |
+| `OPENAI_API_KEY` | 后续真实 AI 服务接入预留，当前版本可留空 |
+| `TTS_MODEL` | 后续云端 TTS 接入预留，当前版本可留空 |
 
 真实服务密钥只保存在本地运行环境中，请勿提交到仓库。
 
@@ -144,8 +126,6 @@ src/asr/           ASR 配置、事件模型和模拟客户端
 src/language/      中英语言对配置
 src/translation/   翻译请求、事件和字幕片段模型
 src/tts/           译文语音播报状态模型
-docs/demo/         演示脚本和视频提交入口
-docs/review/       依赖与原创功能说明
 docs/pr/           分阶段 PR 描述
 ```
 
@@ -190,6 +170,5 @@ docs/pr/           分阶段 PR 描述
 ## 后续计划
 
 - 接入真实 ASR 和翻译服务。
-- 补充正式演示视频文件或公开视频链接。
 - 增加更多语言方向。
 - 优化系统音频在不同操作系统上的兼容性。
