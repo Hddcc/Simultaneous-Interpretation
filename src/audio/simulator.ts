@@ -26,6 +26,27 @@ export function createSimulatedChunk(
   };
 }
 
+export function createCapturedMicrophoneChunk(
+  sequence: number,
+  volume: number,
+  deviceLabel: string
+): NormalizedAudioChunk {
+  const timestampMs = sequence * SIMULATED_CHUNK_DURATION_MS;
+
+  return {
+    id: `microphone-${sequence}-${timestampMs}`,
+    sourceType: "microphone",
+    sequence,
+    timestampMs,
+    durationMs: SIMULATED_CHUNK_DURATION_MS,
+    sampleRate: SIMULATED_SAMPLE_RATE,
+    channels: SIMULATED_CHANNELS,
+    volume,
+    status: "captured",
+    deviceLabel
+  };
+}
+
 export function formatTimestamp(ms: number): string {
   const totalSeconds = Math.floor(ms / 1000);
   const minutes = Math.floor(totalSeconds / 60)

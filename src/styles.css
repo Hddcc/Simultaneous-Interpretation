@@ -271,9 +271,17 @@ button {
 
 .source-actions {
   display: grid;
-  grid-template-columns: 148px minmax(0, 1fr);
+  grid-template-columns: 148px minmax(180px, 280px) minmax(0, 1fr);
   gap: 12px;
   align-items: center;
+}
+
+.source-actions > .volume-meter:last-child:nth-child(2) {
+  grid-column: 2 / 4;
+}
+
+.inline-select {
+  min-height: 38px;
 }
 
 .volume-meter {
