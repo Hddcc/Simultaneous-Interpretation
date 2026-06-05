@@ -8,6 +8,14 @@ import {
 import { createStreamingAsrClient } from "./asr/client";
 import { loadAsrConfig } from "./asr/config";
 import type { AsrEvent, AsrSegment } from "./asr/types";
+import {
+  getLanguagePair,
+  loadPreferredLanguagePair,
+  savePreferredLanguagePair,
+  supportedLanguagePairs
+} from "./language/pairs";
+import { createTranslationClient } from "./translation/client";
+import type { SubtitleSegment, TranslationEvent, TranslationContextItem } from "./translation/types";
 import type {
   AudioSessionState,
   AudioSourceOption,
@@ -35,8 +43,6 @@ const sourceOptions: AudioSourceOption[] = [
     description: "选择本地音频或视频，按实时节奏生成测试音频块。"
   }
 ];
-
-const languageOptions = ["英语 -> 中文", "中文 -> 英语"];
 
 const initialSession: AudioSessionState = {
   sourceType: "system",
@@ -85,7 +91,7 @@ function createDesktopConstraints(sourceId: string): MediaTrackConstraints {
 export function App() {
   const appInfo = window.simultaneousInterpretation;
   const [session, setSession] = useState<AudioSessionState>(initialSession);
-  const [languageDirection, setLanguageDirection] = useState(languageOptions[0]);
+  const [activeLanguagePair, setActiveLanguagePair] = useState(loadPreferredLanguagePair);
   const [recentChunks, setRecentChunks] = useState<NormalizedAudioChunk[]>([]);
   const [microphoneDevices, setMicrophoneDevices] = useState<MicrophoneDevice[]>([]);
   const [selectedMicrophoneId, setSelectedMicrophoneId] = useState("");
@@ -93,13 +99,17 @@ export function App() {
   const [selectedDesktopSourceId, setSelectedDesktopSourceId] = useState("");
   const [asrEvents, setAsrEvents] = useState<AsrEvent[]>([]);
   const [asrSegments, setAsrSegments] = useState<AsrSegment[]>([]);
+  const [translationEvents, setTranslationEvents] = useState<TranslationEvent[]>([]);
+  const [subtitleSegments, setSubtitleSegments] = useState<SubtitleSegment[]>([]);
 
   const chunkSequenceRef = useRef(0);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const captureTimerRef = useRef<number | null>(null);
-  const languageDirectionRef = useRef(languageDirection);
+  const languagePairRef = useRef(activeLanguagePair);
   const asrClientRef = useRef(createStreamingAsrClient(loadAsrConfig()));
+  const translationClientRef = useRef(createTranslationClient());
+  const subtitleSegmentsRef = useRef<SubtitleSegment[]>([]);
 
   const selectedSource = useMemo(
     () => sourceOptions.find((option) => option.type === session.sourceType) ?? sourceOptions[0],
@@ -115,6 +125,8 @@ export function App() {
 
   const latestAsrSegment = asrSegments[0];
   const latestAsrEvent = asrEvents[0];
+  const latestSubtitleSegment = subtitleSegments[0];
+  const latestTranslationEvent = translationEvents[0];
   const asrConfig = asrClientRef.current.getConfig();
 
   useEffect(() => {
@@ -138,8 +150,9 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    languageDirectionRef.current = languageDirection;
-  }, [languageDirection]);
+    languagePairRef.current = activeLanguagePair;
+    savePreferredLanguagePair(activeLanguagePair.id);
+  }, [activeLanguagePair]);
 
   function recordChunk(chunk: NormalizedAudioChunk): void {
     setSession((current) => ({
@@ -154,33 +167,93 @@ export function App() {
   }
 
   function publishAsrEvents(chunk: NormalizedAudioChunk): void {
-    const nextEvents = asrClientRef.current.pushChunk(chunk, languageDirectionRef.current);
+    const nextEvents = asrClientRef.current.pushChunk(chunk, languagePairRef.current);
 
     if (nextEvents.length === 0) {
       return;
     }
 
+    const nextSegments = nextEvents.map((event) => ({
+      id: event.segmentId,
+      sourceType: event.sourceType,
+      text: event.text,
+      status: event.status,
+      startedAtMs: event.audioStartMs,
+      endedAtMs: event.audioEndMs,
+      updatedAtMs: event.receivedAtMs,
+      latencyMs: event.latencyMs,
+      revision: event.revision
+    }));
+
     setAsrEvents((current) => [...nextEvents, ...current].slice(0, 8));
     setAsrSegments((current) => {
       const byId = new Map(current.map((segment) => [segment.id, segment]));
 
-      nextEvents.forEach((event) => {
-        byId.set(event.segmentId, {
-          id: event.segmentId,
-          sourceType: event.sourceType,
-          text: event.text,
-          status: event.status,
-          startedAtMs: event.audioStartMs,
-          endedAtMs: event.audioEndMs,
-          updatedAtMs: event.receivedAtMs,
-          latencyMs: event.latencyMs,
-          revision: event.revision
-        });
+      nextSegments.forEach((segment) => {
+        byId.set(segment.id, segment);
       });
 
       return Array.from(byId.values())
         .sort((left, right) => right.startedAtMs - left.startedAtMs)
         .slice(0, 6);
+    });
+
+    publishTranslationEvents(nextSegments.filter((segment) => segment.status === "final"));
+  }
+
+  function publishTranslationEvents(finalSegments: AsrSegment[]): void {
+    if (finalSegments.length === 0) {
+      return;
+    }
+
+    const nextEvents = finalSegments.map((segment) =>
+      translationClientRef.current.translate({
+        segment,
+        languagePair: languagePairRef.current,
+        context: subtitleSegmentsRef.current.slice(0, 3).map(
+          (item): TranslationContextItem => ({
+            segmentId: item.id,
+            sourceText: item.sourceText,
+            translatedText: item.translatedText
+          })
+        )
+      })
+    );
+
+    setTranslationEvents((current) => [...nextEvents, ...current].slice(0, 8));
+    setSubtitleSegments((current) => {
+      const byId = new Map(current.map((segment) => [segment.id, segment]));
+
+      nextEvents.forEach((event) => {
+        const asrSegment = finalSegments.find((segment) => segment.id === event.segmentId);
+
+        if (!asrSegment) {
+          return;
+        }
+
+        byId.set(event.segmentId, {
+          id: event.segmentId,
+          sourceText: event.sourceText,
+          translatedText: event.translatedText,
+          sourceLanguage: event.sourceLanguage,
+          targetLanguage: event.targetLanguage,
+          status: event.status,
+          revision: event.revision,
+          startedAtMs: asrSegment.startedAtMs,
+          endedAtMs: asrSegment.endedAtMs,
+          updatedAtMs: event.createdAtMs,
+          asrLatencyMs: asrSegment.latencyMs,
+          translationLatencyMs: event.latencyMs,
+          totalLatencyMs: asrSegment.latencyMs + event.latencyMs,
+          contextSize: event.contextSize
+        });
+      });
+
+      const nextSegments = Array.from(byId.values())
+        .sort((left, right) => right.startedAtMs - left.startedAtMs)
+        .slice(0, 6);
+      subtitleSegmentsRef.current = nextSegments;
+      return nextSegments;
     });
   }
 
@@ -188,6 +261,15 @@ export function App() {
     asrClientRef.current.reset();
     setAsrEvents([]);
     setAsrSegments([]);
+    setTranslationEvents([]);
+    setSubtitleSegments([]);
+    subtitleSegmentsRef.current = [];
+  }
+
+  function updateLanguagePair(pairId: string): void {
+    const nextPair = getLanguagePair(pairId);
+    setActiveLanguagePair(nextPair);
+    resetAsrState();
   }
 
   function resetInputState(type: AudioSourceType): void {
@@ -509,11 +591,15 @@ export function App() {
     { label: "音频块", value: String(session.chunksProduced) },
     { label: "ASR", value: `${asrConfig.provider}/${asrConfig.model}` },
     {
-      label: "识别延迟",
-      value: latestAsrEvent ? `${latestAsrEvent.latencyMs} ms` : "等待识别"
+      label: "字幕延迟",
+      value: latestSubtitleSegment
+        ? `${latestSubtitleSegment.totalLatencyMs} ms`
+        : latestAsrEvent
+          ? `${latestAsrEvent.latencyMs} ms`
+          : "等待字幕"
     },
     { label: "音量", value: `${Math.round(session.volume * 100)}%` },
-    { label: "语言方向", value: languageDirection }
+    { label: "语言方向", value: activeLanguagePair.label }
   ];
 
   return (
@@ -543,12 +629,14 @@ export function App() {
           <label>
             <span>语言方向</span>
             <select
-              value={languageDirection}
+              value={activeLanguagePair.id}
               aria-label="选择语言方向"
-              onChange={(event) => setLanguageDirection(event.target.value)}
+              onChange={(event) => updateLanguagePair(event.target.value)}
             >
-              {languageOptions.map((option) => (
-                <option key={option}>{option}</option>
+              {supportedLanguagePairs.map((pair) => (
+                <option key={pair.id} value={pair.id}>
+                  {pair.label}
+                </option>
               ))}
             </select>
           </label>
@@ -576,15 +664,17 @@ export function App() {
 
           <div className="caption-stage" aria-live="polite">
             <p className="source-caption">
-              {latestAsrSegment
-                ? latestAsrSegment.status === "final"
-                  ? "原文识别已确认"
-                  : "原文识别更新中"
+              {latestSubtitleSegment
+                ? latestSubtitleSegment.sourceText
+                : latestAsrSegment
+                  ? latestAsrSegment.text
                 : selectedSource.description}
             </p>
-            <p className="translated-caption asr-caption">
-              {latestAsrSegment
-                ? latestAsrSegment.text
+            <p className="translated-caption">
+              {latestSubtitleSegment
+                ? latestSubtitleSegment.translatedText
+                : latestAsrSegment
+                  ? "正在等待稳定片段生成译文"
                 : session.sourceType === "system"
                   ? `当前来源：${selectedDesktopSourceName}`
                   : session.sourceType === "microphone"
@@ -593,12 +683,28 @@ export function App() {
                       ? `已选择 ${session.selectedFile.name}`
                       : "选择音频源后，可先用文件模拟、麦克风或系统音频验证实时输入链路。"}
             </p>
-            {latestAsrSegment ? (
+            {latestSubtitleSegment || latestAsrSegment ? (
               <div className="asr-detail-row" aria-label="识别事件状态">
-                <span>{latestAsrSegment.status === "final" ? "Final" : "Partial"}</span>
-                <span>片段 {latestAsrSegment.id.replace("asr-segment-", "#")}</span>
-                <span>版本 {latestAsrSegment.revision}</span>
-                <span>{latestAsrSegment.latencyMs} ms</span>
+                <span>{latestSubtitleSegment ? "Translated" : "ASR"}</span>
+                <span>
+                  {latestSubtitleSegment
+                    ? `${latestSubtitleSegment.sourceLanguage} -> ${latestSubtitleSegment.targetLanguage}`
+                    : latestAsrSegment?.status === "final"
+                      ? "Final"
+                      : "Partial"}
+                </span>
+                <span>
+                  片段{" "}
+                  {(latestSubtitleSegment?.id ?? latestAsrSegment?.id ?? "").replace(
+                    "asr-segment-",
+                    "#"
+                  )}
+                </span>
+                <span>
+                  {latestSubtitleSegment
+                    ? `${latestSubtitleSegment.totalLatencyMs} ms`
+                    : `${latestAsrSegment?.latencyMs ?? 0} ms`}
+                </span>
               </div>
             ) : null}
             {session.error ? <p className="error-message">{session.error}</p> : null}
@@ -692,34 +798,37 @@ export function App() {
           <div className="section-heading compact">
             <div>
               <p className="section-kicker">Chunks</p>
-              <h2 id="history-title">输入记录</h2>
+              <h2 id="history-title">字幕记录</h2>
             </div>
             <span className="small-version">v{appInfo?.version ?? "0.1.0"}</span>
           </div>
 
           <div className="history-list">
-            {asrSegments.length === 0 ? (
+            {subtitleSegments.length === 0 ? (
               <article className="history-item">
                 <div className="history-meta">
                   <time>--:--</time>
                   <span>等待</span>
                 </div>
-                <p className="history-source">暂无识别文本</p>
+                <p className="history-source">暂无译文字幕</p>
                 <p className="history-translation">
-                  开始文件模拟、麦克风或系统音频采集后，这里会显示实时 ASR 片段。
+                  稳定原文片段生成后，这里会显示双语字幕和翻译延迟。
                 </p>
               </article>
             ) : (
-              asrSegments.map((segment) => (
+              subtitleSegments.map((segment) => (
                 <article className="history-item" key={segment.id}>
                   <div className="history-meta">
                     <time>{formatTimestamp(segment.startedAtMs)}</time>
-                    <span>{segment.status === "final" ? "Final" : "Partial"}</span>
+                    <span>{`${segment.sourceLanguage} -> ${segment.targetLanguage}`}</span>
                   </div>
-                  <p className="history-source">{segment.text}</p>
+                  <p className="history-source">{segment.sourceText}</p>
                   <p className="history-translation">
-                    {getSourceLabel(segment.sourceType)} · 版本 {segment.revision} · 延迟{" "}
-                    {segment.latencyMs} ms
+                    {segment.translatedText}
+                  </p>
+                  <p className="history-footnote">
+                    版本 {segment.revision} · 上下文 {segment.contextSize} · 延迟{" "}
+                    {segment.totalLatencyMs} ms
                   </p>
                 </article>
               ))

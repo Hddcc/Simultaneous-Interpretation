@@ -1,4 +1,5 @@
 import type { NormalizedAudioChunk } from "../audio/types";
+import type { LanguagePair } from "../language/pairs";
 import type { AsrClient, AsrConfig, AsrEvent } from "./types";
 
 const ENGLISH_SEGMENTS = [
@@ -15,8 +16,8 @@ const CHINESE_SEGMENTS = [
   "这个设计能让字幕保持流畅，并为后续修正留出空间。"
 ];
 
-function usesEnglishSource(languageDirection: string): boolean {
-  return languageDirection.startsWith("英语");
+function usesEnglishSource(languagePair: LanguagePair): boolean {
+  return languagePair.source.code.startsWith("en");
 }
 
 function buildPartialText(fullText: string, revision: number, englishSource: boolean): string {
@@ -40,7 +41,7 @@ export function createStreamingAsrClient(config: AsrConfig): AsrClient {
     reset() {
       finalizedSegments.clear();
     },
-    pushChunk(chunk: NormalizedAudioChunk, languageDirection: string): AsrEvent[] {
+    pushChunk(chunk: NormalizedAudioChunk, languagePair: LanguagePair): AsrEvent[] {
       const segmentIndex = Math.floor(chunk.sequence / 3);
       const revision = (chunk.sequence % 3) + 1;
       const status = revision === 3 ? "final" : "partial";
@@ -54,7 +55,7 @@ export function createStreamingAsrClient(config: AsrConfig): AsrClient {
         finalizedSegments.add(segmentId);
       }
 
-      const englishSource = usesEnglishSource(languageDirection);
+      const englishSource = usesEnglishSource(languagePair);
       const fullText = englishSource
         ? ENGLISH_SEGMENTS[segmentIndex % ENGLISH_SEGMENTS.length]
         : CHINESE_SEGMENTS[segmentIndex % CHINESE_SEGMENTS.length];

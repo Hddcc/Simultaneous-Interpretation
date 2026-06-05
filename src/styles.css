@@ -365,7 +365,8 @@ button {
 }
 
 .history-source,
-.history-translation {
+.history-translation,
+.history-footnote {
   margin: 10px 0 0;
   line-height: 1.5;
 }
@@ -378,6 +379,12 @@ button {
 .history-translation {
   color: #f8fafc;
   font-size: 15px;
+  font-weight: 800;
+}
+
+.history-footnote {
+  color: #94a3b8;
+  font-size: 12px;
   font-weight: 800;
 }
 
