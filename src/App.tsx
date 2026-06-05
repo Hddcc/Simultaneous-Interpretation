@@ -56,6 +56,17 @@ const initialSession: AudioSessionState = {
 
 const RECENT_REVISION_WINDOW = 4;
 
+const defaultFloatingCaptionState: FloatingCaptionState = {
+  translatedText: "等待字幕",
+  sourceText: "开始输入后，这里会显示实时字幕。",
+  statusLabel: "等待输入",
+  languageDirection: "英语 -> 中文",
+  sessionStatus: "idle",
+  latencyLabel: "等待字幕",
+  revised: false,
+  updatedAtMs: Date.now()
+};
+
 function formatFileSize(bytes: number): string {
   if (bytes < 1024 * 1024) {
     return `${Math.max(1, Math.round(bytes / 1024))} KB`;
@@ -93,6 +104,34 @@ function getVolumeFromAnalyser(analyser: AnalyserNode): number {
   return Math.min(1, Math.sqrt(sum / samples.length) * 3);
 }
 
+function isFloatingCaptionWindow(): boolean {
+  return new URLSearchParams(window.location.search).get("window") === "floating";
+}
+
+function FloatingCaptionWindow() {
+  const appInfo = window.simultaneousInterpretation;
+  const [caption, setCaption] = useState<FloatingCaptionState>(defaultFloatingCaptionState);
+
+  useEffect(() => {
+    return appInfo?.onFloatingCaptionUpdate?.((state) => setCaption(state));
+  }, [appInfo]);
+
+  return (
+    <main className={`floating-caption-shell ${caption.revised ? "floating-revised" : ""}`}>
+      <div className="floating-caption-top">
+        <span>{caption.statusLabel}</span>
+        <span>{caption.languageDirection}</span>
+      </div>
+      <p className="floating-source">{caption.sourceText}</p>
+      <p className="floating-translation">{caption.translatedText}</p>
+      <div className="floating-caption-bottom">
+        <span>{caption.sessionStatus}</span>
+        <span>{caption.latencyLabel}</span>
+      </div>
+    </main>
+  );
+}
+
 function createDesktopConstraints(sourceId: string): MediaTrackConstraints {
   return {
     mandatory: {
@@ -104,6 +143,11 @@ function createDesktopConstraints(sourceId: string): MediaTrackConstraints {
 
 export function App() {
   const appInfo = window.simultaneousInterpretation;
+
+  if (isFloatingCaptionWindow()) {
+    return <FloatingCaptionWindow />;
+  }
+
   const [session, setSession] = useState<AudioSessionState>(initialSession);
   const [activeLanguagePair, setActiveLanguagePair] = useState(loadPreferredLanguagePair);
   const [recentChunks, setRecentChunks] = useState<NormalizedAudioChunk[]>([]);
@@ -115,6 +159,10 @@ export function App() {
   const [asrSegments, setAsrSegments] = useState<AsrSegment[]>([]);
   const [translationEvents, setTranslationEvents] = useState<TranslationEvent[]>([]);
   const [subtitleSegments, setSubtitleSegments] = useState<SubtitleSegment[]>([]);
+  const [floatingCaptionVisible, setFloatingCaptionVisible] = useState(false);
+  const [floatingLayout, setFloatingLayout] = useState<FloatingCaptionLayout>("standard");
+  const [floatingPosition, setFloatingPosition] =
+    useState<FloatingCaptionPosition>("bottom-right");
 
   const chunkSequenceRef = useRef(0);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -143,6 +191,41 @@ export function App() {
   const latestTranslationEvent = translationEvents[0];
   const asrConfig = asrClientRef.current.getConfig();
 
+  const floatingCaptionState = useMemo<FloatingCaptionState>(
+    () => ({
+      translatedText:
+        latestSubtitleSegment?.translatedText ??
+        (latestAsrSegment ? "正在等待稳定片段生成译文" : "等待字幕"),
+      sourceText: latestSubtitleSegment?.sourceText ?? latestAsrSegment?.text ?? selectedSource.description,
+      statusLabel: latestSubtitleSegment
+        ? latestSubtitleSegment.revised
+          ? "字幕已修订"
+          : latestSubtitleSegment.status === "partial"
+            ? "临时字幕"
+            : "实时字幕"
+        : session.status === "streaming"
+          ? "识别中"
+          : "等待输入",
+      languageDirection: activeLanguagePair.label,
+      sessionStatus: session.status,
+      latencyLabel: latestSubtitleSegment
+        ? `${latestSubtitleSegment.totalLatencyMs} ms`
+        : latestAsrEvent
+          ? `${latestAsrEvent.latencyMs} ms`
+          : "等待字幕",
+      revised: Boolean(latestSubtitleSegment?.revised),
+      updatedAtMs: Date.now()
+    }),
+    [
+      activeLanguagePair.label,
+      latestAsrEvent,
+      latestAsrSegment,
+      latestSubtitleSegment,
+      selectedSource.description,
+      session.status
+    ]
+  );
+
   useEffect(() => {
     if (session.status !== "streaming" || session.sourceType !== "file") {
       return undefined;
@@ -167,6 +250,10 @@ export function App() {
     languagePairRef.current = activeLanguagePair;
     savePreferredLanguagePair(activeLanguagePair.id);
   }, [activeLanguagePair]);
+
+  useEffect(() => {
+    appInfo?.updateFloatingCaption?.(floatingCaptionState);
+  }, [appInfo, floatingCaptionState]);
 
   function recordChunk(chunk: NormalizedAudioChunk): void {
     setSession((current) => ({
@@ -617,6 +704,48 @@ export function App() {
     }));
   }
 
+  async function openFloatingCaption(): Promise<void> {
+    if (!appInfo?.openFloatingCaption) {
+      setSession((current) => ({
+        ...current,
+        error: "当前运行环境无法打开悬浮字幕窗口。"
+      }));
+      return;
+    }
+
+    const result = await appInfo.openFloatingCaption({
+      layout: floatingLayout,
+      position: floatingPosition
+    });
+    setFloatingCaptionVisible(result.visible);
+    appInfo.updateFloatingCaption?.(floatingCaptionState);
+  }
+
+  async function closeFloatingCaption(): Promise<void> {
+    const result = await appInfo?.closeFloatingCaption?.();
+    setFloatingCaptionVisible(Boolean(result?.visible));
+  }
+
+  function updateFloatingLayout(layout: FloatingCaptionLayout): void {
+    setFloatingLayout(layout);
+    if (floatingCaptionVisible) {
+      void appInfo?.configureFloatingCaption?.({
+        layout,
+        position: floatingPosition
+      });
+    }
+  }
+
+  function updateFloatingPosition(position: FloatingCaptionPosition): void {
+    setFloatingPosition(position);
+    if (floatingCaptionVisible) {
+      void appInfo?.configureFloatingCaption?.({
+        layout: floatingLayout,
+        position
+      });
+    }
+  }
+
   const metrics = [
     { label: "音频源", value: getSourceLabel(session.sourceType) },
     { label: "输入状态", value: session.status },
@@ -632,6 +761,7 @@ export function App() {
     },
     { label: "音量", value: `${Math.round(session.volume * 100)}%` },
     { label: "修订窗口", value: `${RECENT_REVISION_WINDOW} 条` },
+    { label: "悬浮窗", value: floatingCaptionVisible ? "已打开" : "未打开" },
     { label: "语言方向", value: activeLanguagePair.label }
   ];
 
@@ -819,6 +949,46 @@ export function App() {
             <div className="volume-meter" aria-label="音量活动">
               <span style={{ width: `${Math.round(session.volume * 100)}%` }} />
             </div>
+          </div>
+
+          <div className="floating-controls" aria-label="悬浮字幕控制">
+            <button
+              type="button"
+              className="secondary-action"
+              onClick={() => void openFloatingCaption()}
+            >
+              打开悬浮字幕
+            </button>
+            <button
+              type="button"
+              className="secondary-action"
+              onClick={() => void closeFloatingCaption()}
+            >
+              关闭悬浮字幕
+            </button>
+            <select
+              className="inline-select"
+              value={floatingLayout}
+              aria-label="悬浮字幕尺寸"
+              onChange={(event) => updateFloatingLayout(event.target.value as FloatingCaptionLayout)}
+            >
+              <option value="compact">紧凑</option>
+              <option value="standard">标准</option>
+              <option value="wide">宽屏</option>
+            </select>
+            <select
+              className="inline-select"
+              value={floatingPosition}
+              aria-label="悬浮字幕位置"
+              onChange={(event) =>
+                updateFloatingPosition(event.target.value as FloatingCaptionPosition)
+              }
+            >
+              <option value="top-left">左上</option>
+              <option value="top-right">右上</option>
+              <option value="bottom-left">左下</option>
+              <option value="bottom-right">右下</option>
+            </select>
           </div>
 
           <div className="placeholder-row" aria-label="输入源状态">

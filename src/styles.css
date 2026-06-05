@@ -309,6 +309,13 @@ button {
   min-height: 38px;
 }
 
+.floating-controls {
+  display: grid;
+  grid-template-columns: 148px 148px minmax(120px, 180px) minmax(120px, 180px);
+  gap: 12px;
+  align-items: center;
+}
+
 .volume-meter {
   position: relative;
   height: 14px;
@@ -400,7 +407,7 @@ button {
 
 .status-strip {
   display: grid;
-  grid-template-columns: repeat(8, minmax(0, 1fr));
+  grid-template-columns: repeat(9, minmax(0, 1fr));
   gap: 1px;
   overflow: hidden;
   padding: 0;
@@ -453,7 +460,8 @@ button {
 
   .control-cluster,
   .placeholder-row,
-  .source-actions {
+  .source-actions,
+  .floating-controls {
     grid-template-columns: 1fr;
   }
 
@@ -468,4 +476,51 @@ button {
   .status-strip {
     grid-template-columns: 1fr;
   }
+}
+
+.floating-caption-shell {
+  display: grid;
+  align-content: center;
+  gap: 10px;
+  min-height: 100vh;
+  padding: 18px 20px;
+  border: 1px solid rgba(94, 234, 212, 0.42);
+  color: #f8fafc;
+  background:
+    linear-gradient(135deg, rgba(20, 184, 166, 0.2), transparent 48%),
+    rgba(2, 6, 23, 0.96);
+}
+
+.floating-revised {
+  border-color: rgba(249, 115, 22, 0.72);
+}
+
+.floating-caption-top,
+.floating-caption-bottom {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  color: #99f6e4;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.floating-source,
+.floating-translation {
+  margin: 0;
+  letter-spacing: 0;
+  overflow-wrap: anywhere;
+}
+
+.floating-source {
+  color: #cbd5e1;
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+.floating-translation {
+  color: #f8fafc;
+  font-size: 28px;
+  font-weight: 900;
+  line-height: 1.28;
 }

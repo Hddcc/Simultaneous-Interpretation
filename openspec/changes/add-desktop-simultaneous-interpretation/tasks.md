@@ -64,11 +64,11 @@
 
 ## 9. PR 9 - Floating Caption Window
 
-- [ ] 9.1 Implement a separate floating caption window that can stay visible above other applications.
-- [ ] 9.2 Add controls to open, close, resize, and reposition the floating caption window.
-- [ ] 9.3 Stream current translated subtitle and basic session status into the floating window.
-- [ ] 9.4 Verify floating captions remain usable while the user focuses a browser, meeting app, or media player.
-- [ ] 9.5 Prepare a PR description focused only on floating caption experience.
+- [x] 9.1 Implement a separate floating caption window that can stay visible above other applications.
+- [x] 9.2 Add controls to open, close, resize, and reposition the floating caption window.
+- [x] 9.3 Stream current translated subtitle and basic session status into the floating window.
+- [x] 9.4 Verify floating captions remain usable while the user focuses a browser, meeting app, or media player.
+- [x] 9.5 Prepare a PR description focused only on floating caption experience.
 
 ## 10. PR 10 - Optional TTS Output
 
