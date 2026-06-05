@@ -49,5 +49,5 @@ export interface SubtitleSegment {
 }
 
 export interface TranslationClient {
-  translate(request: TranslationRequest): TranslationEvent;
+  translate(request: TranslationRequest): Promise<TranslationEvent>;
 }

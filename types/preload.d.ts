@@ -42,6 +42,43 @@ declare global {
     };
   }
 
+  interface AiRuntimeConfig {
+    provider: "mock" | "openai" | "custom";
+    asrMode: "mock" | "provider";
+    asrModel: string;
+    translationModel: string;
+    hasOpenAiKey: boolean;
+  }
+
+  interface TranslateTextRequest {
+    text: string;
+    sourceLanguage: string;
+    targetLanguage: string;
+    model?: string;
+    context?: Array<{
+      sourceText: string;
+      translatedText: string;
+    }>;
+  }
+
+  interface TranslateTextResponse {
+    text: string;
+    model: string;
+    latencyMs: number;
+  }
+
+  interface TranscribeLocalMediaFileRequest {
+    filePath: string;
+    languageCode: string;
+    model?: string;
+  }
+
+  interface TranscribeLocalMediaFileResponse {
+    text: string;
+    model: string;
+    latencyMs: number;
+  }
+
   interface Window {
     simultaneousInterpretation?: {
       appName: string;
@@ -55,6 +92,11 @@ declare global {
       configureFloatingCaption: (
         options: FloatingCaptionOptions
       ) => Promise<FloatingCaptionWindowResult>;
+      getAiRuntimeConfig: () => Promise<AiRuntimeConfig>;
+      translateText: (request: TranslateTextRequest) => Promise<TranslateTextResponse>;
+      transcribeLocalMediaFile: (
+        request: TranscribeLocalMediaFileRequest
+      ) => Promise<TranscribeLocalMediaFileResponse>;
       updateFloatingCaption: (state: FloatingCaptionState) => void;
       onFloatingCaptionUpdate: (callback: (state: FloatingCaptionState) => void) => () => void;
     };

@@ -56,6 +56,7 @@ const initialSession: AudioSessionState = {
 };
 
 const RECENT_REVISION_WINDOW = 4;
+const PROVIDER_TRANSCRIPT_SEGMENT_MS = 2800;
 
 const defaultFloatingCaptionState: FloatingCaptionState = {
   translatedText: "等待字幕",
@@ -146,6 +147,19 @@ function isFloatingCaptionWindow(): boolean {
   return new URLSearchParams(window.location.search).get("window") === "floating";
 }
 
+function splitTranscriptIntoSegments(text: string): string[] {
+  const segments = text
+    .split(/(?<=[.!?。！？])\s+|\n+/)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+
+  if (segments.length > 0) {
+    return segments.slice(0, 8);
+  }
+
+  return text.trim() ? [text.trim()] : [];
+}
+
 function FloatingCaptionWindow() {
   const appInfo = window.simultaneousInterpretation;
   const [caption, setCaption] = useState<FloatingCaptionState>(defaultFloatingCaptionState);
@@ -202,6 +216,7 @@ export function App() {
   const [floatingPosition, setFloatingPosition] =
     useState<FloatingCaptionPosition>("bottom-right");
   const [ttsSession, setTtsSession] = useState<TtsSessionState>(initialTtsSession);
+  const [aiRuntimeConfig, setAiRuntimeConfig] = useState<AiRuntimeConfig | null>(null);
 
   const chunkSequenceRef = useRef(0);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -298,6 +313,10 @@ export function App() {
   useEffect(() => {
     ttsSessionRef.current = ttsSession;
   }, [ttsSession]);
+
+  useEffect(() => {
+    void appInfo?.getAiRuntimeConfig?.().then(setAiRuntimeConfig);
+  }, [appInfo]);
 
   useEffect(() => {
     return () => {
@@ -404,16 +423,17 @@ export function App() {
         .slice(0, 6);
     });
 
-    publishTranslationEvents(nextSegments);
+    void publishTranslationEvents(nextSegments);
   }
 
-  function publishTranslationEvents(changedSegments: AsrSegment[]): void {
+  async function publishTranslationEvents(changedSegments: AsrSegment[]): Promise<void> {
     if (changedSegments.length === 0) {
       return;
     }
 
-    const nextEvents = changedSegments.map((segment) =>
-      translationClientRef.current.translate({
+    const nextEvents = await Promise.all(
+      changedSegments.map((segment) =>
+        translationClientRef.current.translate({
         segment,
         languagePair: languagePairRef.current,
         context: subtitleSegmentsRef.current.slice(0, 3).map(
@@ -424,6 +444,7 @@ export function App() {
           })
         )
       })
+      )
     );
 
     setTranslationEvents((current) => [...nextEvents, ...current].slice(0, 8));
@@ -478,6 +499,73 @@ export function App() {
         .slice(0, 6);
       subtitleSegmentsRef.current = nextSegments;
       return nextSegments;
+    });
+  }
+
+  function publishProviderTranscript(text: string, latencyMs: number): void {
+    const segments = splitTranscriptIntoSegments(text);
+
+    if (segments.length === 0) {
+      setSession((current) => ({
+        ...current,
+        status: "error",
+        error: "真实转写结果为空。"
+      }));
+      return;
+    }
+
+    segments.forEach((segmentText, index) => {
+      window.setTimeout(() => {
+        const segmentId = `provider-segment-${index + 1}`;
+        const now = Date.now();
+        const asrEvent: AsrEvent = {
+          id: `${segmentId}-final`,
+          segmentId,
+          chunkId: `provider-file-${index + 1}`,
+          sourceType: "file",
+          sequence: index,
+          audioStartMs: index * PROVIDER_TRANSCRIPT_SEGMENT_MS,
+          audioEndMs: (index + 1) * PROVIDER_TRANSCRIPT_SEGMENT_MS,
+          text: segmentText,
+          status: "final",
+          revision: 1,
+          receivedAtMs: now,
+          latencyMs: index === 0 ? latencyMs : 180
+        };
+        const asrSegment: AsrSegment = {
+          id: segmentId,
+          sourceType: "file",
+          text: segmentText,
+          status: "final",
+          startedAtMs: asrEvent.audioStartMs,
+          endedAtMs: asrEvent.audioEndMs,
+          updatedAtMs: now,
+          latencyMs: asrEvent.latencyMs,
+          revision: 1
+        };
+
+        setAsrEvents((current) => [asrEvent, ...current].slice(0, 8));
+        setAsrSegments((current) => [asrSegment, ...current].slice(0, 6));
+        setSession((current) => ({
+          ...current,
+          chunksProduced: current.chunksProduced + 1,
+          lastChunk: {
+            id: asrEvent.chunkId,
+            sourceType: "file",
+            sequence: index,
+            timestampMs: asrEvent.audioStartMs,
+            durationMs: PROVIDER_TRANSCRIPT_SEGMENT_MS,
+            sampleRate: 16000,
+            channels: 1,
+            volume: 0.72,
+            status: "captured",
+            fileName: current.selectedFile?.name
+          },
+          volume: 0.72,
+          error: null
+        }));
+        void publishTranslationEvents([asrSegment]);
+      }, index * 700);
     });
   }
 
@@ -770,6 +858,15 @@ export function App() {
   }
 
   async function startSession(): Promise<void> {
+    if (
+      session.sourceType === "file" &&
+      asrConfig.provider === "openai" &&
+      asrConfig.mode === "provider"
+    ) {
+      await startProviderFileTranscription();
+      return;
+    }
+
     if (session.sourceType === "system") {
       await startSystemAudioCapture();
       return;
@@ -796,6 +893,62 @@ export function App() {
       status: "streaming",
       error: null
     }));
+  }
+
+  async function startProviderFileTranscription(): Promise<void> {
+    cleanupActiveCapture();
+
+    if (!session.selectedFile) {
+      setSession((current) => ({
+        ...current,
+        status: "error",
+        error: "请先选择一个本地音频或视频文件。"
+      }));
+      return;
+    }
+
+    if (!appInfo?.transcribeLocalMediaFile) {
+      setSession((current) => ({
+        ...current,
+        status: "error",
+        error: "当前运行环境无法调用真实转写服务。"
+      }));
+      return;
+    }
+
+    if (aiRuntimeConfig && !aiRuntimeConfig.hasOpenAiKey) {
+      setSession((current) => ({
+        ...current,
+        status: "error",
+        error: "请先在 .env 中配置 OPENAI_API_KEY，然后重启应用。"
+      }));
+      return;
+    }
+
+    resetAsrState();
+    setSession((current) => ({
+      ...current,
+      status: "streaming",
+      error: null,
+      chunksProduced: 0,
+      volume: 0
+    }));
+
+    try {
+      const response = await appInfo.transcribeLocalMediaFile({
+        filePath: session.selectedFile.path,
+        languageCode: activeLanguagePair.source.code,
+        model: asrConfig.model
+      });
+      publishProviderTranscript(response.text, response.latencyMs);
+    } catch (error) {
+      setSession((current) => ({
+        ...current,
+        status: "error",
+        volume: 0,
+        error: error instanceof Error ? error.message : "真实转写服务调用失败。"
+      }));
+    }
   }
 
   function pauseSession(): void {
@@ -966,6 +1119,15 @@ export function App() {
     { label: "输入状态", value: session.status },
     { label: "音频块", value: String(session.chunksProduced) },
     { label: "ASR", value: `${asrConfig.provider}/${asrConfig.model}` },
+    {
+      label: "API Key",
+      value:
+        aiRuntimeConfig?.provider === "openai"
+          ? aiRuntimeConfig.hasOpenAiKey
+            ? "已配置"
+            : "未配置"
+          : "模拟"
+    },
     {
       label: "字幕延迟",
       value: latestSubtitleSegment

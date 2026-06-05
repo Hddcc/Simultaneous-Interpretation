@@ -1,5 +1,5 @@
 import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, screen, session } from "electron";
-import { stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 
 const isDev = process.argv.includes("--dev");
@@ -25,10 +25,259 @@ interface FloatingCaptionState {
   updatedAtMs: number;
 }
 
+interface AiRuntimeConfig {
+  provider: "mock" | "openai" | "custom";
+  asrMode: "mock" | "provider";
+  asrModel: string;
+  translationModel: string;
+  hasOpenAiKey: boolean;
+}
+
+interface TranslateTextRequest {
+  text: string;
+  sourceLanguage: string;
+  targetLanguage: string;
+  model?: string;
+  context?: Array<{
+    sourceText: string;
+    translatedText: string;
+  }>;
+}
+
+interface TranslateTextResponse {
+  text: string;
+  model: string;
+  latencyMs: number;
+}
+
+interface TranscribeLocalMediaFileRequest {
+  filePath: string;
+  languageCode: string;
+  model?: string;
+}
+
+interface TranscribeLocalMediaFileResponse {
+  text: string;
+  model: string;
+  latencyMs: number;
+}
+
+interface OpenAiErrorResponse {
+  error?: {
+    message?: string;
+  };
+}
+
+interface OpenAiResponseOutput {
+  output_text?: string;
+  output?: Array<{
+    content?: Array<{
+      text?: string;
+    }>;
+  }>;
+}
+
+interface OpenAiTranscriptionOutput {
+  text?: string;
+}
+
 const defaultFloatingOptions: FloatingCaptionOptions = {
   layout: "standard",
   position: "bottom-right"
 };
+
+async function loadLocalEnv(): Promise<void> {
+  const envPath = path.join(process.cwd(), ".env");
+
+  try {
+    const content = await readFile(envPath, "utf8");
+    content.split(/\r?\n/).forEach((line) => {
+      const trimmed = line.trim();
+
+      if (!trimmed || trimmed.startsWith("#")) {
+        return;
+      }
+
+      const separatorIndex = trimmed.indexOf("=");
+      if (separatorIndex <= 0) {
+        return;
+      }
+
+      const key = trimmed.slice(0, separatorIndex).trim();
+      const value = trimmed
+        .slice(separatorIndex + 1)
+        .trim()
+        .replace(/^['"]|['"]$/g, "");
+
+      if (!process.env[key]) {
+        process.env[key] = value;
+      }
+    });
+  } catch {
+    // .env is optional. The app can still run with mock providers.
+  }
+}
+
+function getAiRuntimeConfig(): AiRuntimeConfig {
+  const provider = process.env.VITE_AI_PROVIDER === "openai" ? "openai" : "mock";
+  const asrMode = provider === "openai" && process.env.VITE_ASR_MODE === "provider" ? "provider" : "mock";
+
+  return {
+    provider,
+    asrMode,
+    asrModel: process.env.VITE_ASR_MODEL || (provider === "openai" ? "gpt-4o-mini-transcribe" : "mock-streaming-asr"),
+    translationModel:
+      process.env.VITE_TRANSLATION_MODEL || (provider === "openai" ? "gpt-4.1-mini" : "mock-bilingual-translator"),
+    hasOpenAiKey: Boolean(process.env.OPENAI_API_KEY)
+  };
+}
+
+function getOpenAiKey(): string {
+  const apiKey = process.env.OPENAI_API_KEY;
+
+  if (!apiKey) {
+    throw new Error("请先在 .env 中配置 OPENAI_API_KEY。");
+  }
+
+  return apiKey;
+}
+
+function readOpenAiError(payload: OpenAiErrorResponse): string {
+  return payload.error?.message || "OpenAI 请求失败。";
+}
+
+function readOpenAiOutputText(payload: OpenAiResponseOutput): string {
+  if (payload.output_text) {
+    return payload.output_text.trim();
+  }
+
+  const text = payload.output
+    ?.flatMap((item) => item.content ?? [])
+    .map((content) => content.text)
+    .find((value): value is string => Boolean(value?.trim()));
+
+  if (!text) {
+    throw new Error("OpenAI 返回结果中没有可用文本。");
+  }
+
+  return text.trim();
+}
+
+function getMediaMimeType(filePath: string): string {
+  const extension = path.extname(filePath).toLowerCase();
+
+  if (extension === ".mp3") {
+    return "audio/mpeg";
+  }
+
+  if (extension === ".wav") {
+    return "audio/wav";
+  }
+
+  if (extension === ".m4a") {
+    return "audio/mp4";
+  }
+
+  if (extension === ".mp4") {
+    return "video/mp4";
+  }
+
+  if (extension === ".webm") {
+    return "video/webm";
+  }
+
+  return "application/octet-stream";
+}
+
+function normalizeOpenAiLanguage(languageCode: string): string {
+  return languageCode.toLowerCase().startsWith("zh") ? "zh" : "en";
+}
+
+async function translateWithOpenAi(request: TranslateTextRequest): Promise<TranslateTextResponse> {
+  const startedAtMs = Date.now();
+  const model = request.model || getAiRuntimeConfig().translationModel;
+  const contextText =
+    request.context && request.context.length > 0
+      ? request.context
+          .map((item, index) => `${index + 1}. ${item.sourceText} => ${item.translatedText}`)
+          .join("\n")
+      : "No previous subtitle context.";
+
+  const response = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${getOpenAiKey()}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model,
+      input: [
+        {
+          role: "system",
+          content:
+            "You are a realtime conference interpreter. Translate faithfully, keep terminology stable, and return only the translated text."
+        },
+        {
+          role: "user",
+          content: `Translate from ${request.sourceLanguage} to ${request.targetLanguage}.\n\nRecent context:\n${contextText}\n\nText:\n${request.text}`
+        }
+      ]
+    })
+  });
+
+  const payload = (await response.json()) as OpenAiResponseOutput & OpenAiErrorResponse;
+
+  if (!response.ok) {
+    throw new Error(readOpenAiError(payload));
+  }
+
+  return {
+    text: readOpenAiOutputText(payload),
+    model,
+    latencyMs: Date.now() - startedAtMs
+  };
+}
+
+async function transcribeLocalMediaFileWithOpenAi(
+  request: TranscribeLocalMediaFileRequest
+): Promise<TranscribeLocalMediaFileResponse> {
+  const startedAtMs = Date.now();
+  const model = request.model || getAiRuntimeConfig().asrModel;
+  const fileBuffer = await readFile(request.filePath);
+  const form = new FormData();
+  form.set("model", model);
+  form.set("language", normalizeOpenAiLanguage(request.languageCode));
+  form.set("response_format", "json");
+  form.set(
+    "file",
+    new Blob([fileBuffer], { type: getMediaMimeType(request.filePath) }),
+    path.basename(request.filePath)
+  );
+
+  const response = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${getOpenAiKey()}`
+    },
+    body: form
+  });
+
+  const payload = (await response.json()) as OpenAiTranscriptionOutput & OpenAiErrorResponse;
+
+  if (!response.ok) {
+    throw new Error(readOpenAiError(payload));
+  }
+
+  if (!payload.text?.trim()) {
+    throw new Error("OpenAI 转写结果为空。");
+  }
+
+  return {
+    text: payload.text.trim(),
+    model,
+    latencyMs: Date.now() - startedAtMs
+  };
+}
 
 function getFloatingWindowSize(layout: FloatingCaptionLayout): { width: number; height: number } {
   if (layout === "compact") {
@@ -208,7 +457,19 @@ ipcMain.on("floating-caption:update", (_event, state: FloatingCaptionState) => {
   sendFloatingCaptionState();
 });
 
-app.whenReady().then(() => {
+ipcMain.handle("ai:get-runtime-config", () => getAiRuntimeConfig());
+
+ipcMain.handle("ai:translate-text", (_event, request: TranslateTextRequest) =>
+  translateWithOpenAi(request)
+);
+
+ipcMain.handle("ai:transcribe-local-media-file", (_event, request: TranscribeLocalMediaFileRequest) =>
+  transcribeLocalMediaFileWithOpenAi(request)
+);
+
+app.whenReady().then(async () => {
+  await loadLocalEnv();
+
   session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
     callback(permission === "media" || permission === "display-capture");
   });
