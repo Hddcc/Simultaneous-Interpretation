@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, session } from "electron";
+import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, session } from "electron";
 import { stat } from "node:fs/promises";
 import path from "node:path";
 
@@ -56,9 +56,22 @@ ipcMain.handle("dialog:select-local-media-file", async () => {
   };
 });
 
+ipcMain.handle("desktop:list-audio-sources", async () => {
+  const sources = await desktopCapturer.getSources({
+    types: ["screen", "window"],
+    thumbnailSize: { width: 0, height: 0 },
+    fetchWindowIcons: false
+  });
+
+  return sources.map((source) => ({
+    id: source.id,
+    name: source.name
+  }));
+});
+
 app.whenReady().then(() => {
   session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
-    callback(permission === "media");
+    callback(permission === "media" || permission === "display-capture");
   });
 
   createMainWindow();

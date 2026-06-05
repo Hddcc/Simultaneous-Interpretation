@@ -8,11 +8,17 @@ declare global {
     extension: string;
   }
 
+  interface DesktopAudioSource {
+    id: string;
+    name: string;
+  }
+
   interface Window {
     simultaneousInterpretation?: {
       appName: string;
       version: string;
       selectLocalMediaFile: () => Promise<LocalMediaFile | null>;
+      listDesktopAudioSources: () => Promise<DesktopAudioSource[]>;
     };
   }
 }
