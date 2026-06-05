@@ -17,6 +17,7 @@ The project must also satisfy coursework review expectations: public repository 
 - Add a desktop UI with a main workbench, floating caption window, session history, source controls, language controls, and status indicators.
 - Add optional text-to-speech output as an enhancement after the subtitle workflow is stable.
 - Add repository delivery workflow tasks so each PR is implemented and reviewed as a separate apply cycle.
+- Keep README documentation and future README updates written in Chinese, while preserving command names, API names, environment variables, and code paths in their original form.
 
 ## Capabilities
 
@@ -40,4 +41,5 @@ The project must also satisfy coursework review expectations: public repository 
 - Adds audio capture, buffering, segmentation, and status reporting logic.
 - Adds UI state models for streaming subtitles, revised subtitles, sessions, language pairs, audio source selection, and service health.
 - Adds GitHub-oriented delivery artifacts such as README, PR template, `.gitignore`, `.env.example`, and demo documentation.
+- Requires Chinese README documentation for project setup, usage, demo, dependency attribution, and future README updates.
 - Requires secure API key handling through environment configuration and explicit README setup instructions.

@@ -1,19 +1,19 @@
-## Title
+## 标题
 
-<!-- One sentence explaining what this PR adds or changes. -->
+<!-- 用一句话说明本 PR 新增或修改了什么。 -->
 
-## Feature Description
+## 功能描述
 
-<!-- Explain the feature purpose and how to use it. -->
+<!-- 说明该功能的作用和使用方式。 -->
 
-## Implementation Approach
+## 实现思路
 
-<!-- Briefly describe the technical choices or core logic. -->
+<!-- 简要说明技术选型、核心逻辑或关键实现方式。 -->
 
-## Verification
+## 验证方式
 
-<!-- List commands or manual checks used to verify this PR. -->
+<!-- 列出用于验证本 PR 的命令或手动检查步骤。 -->
 
-## Scope
+## 变更范围
 
-<!-- Confirm this PR is limited to one functional slice. -->
+<!-- 确认本 PR 只覆盖一个功能切片。 -->

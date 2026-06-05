@@ -39,6 +39,13 @@ The project MUST provide a README and demo video or demo instructions suitable f
 - **WHEN** a reviewer opens the repository after the submission deadline
 - **THEN** the README explains project purpose, setup, API key configuration, run commands, core features, dependency attribution, and original implementation highlights
 
+### Requirement: Maintain Chinese README documentation
+The project MUST write README content and future README updates in Chinese, while preserving commands, code paths, dependency names, API names, and environment variables in their original form.
+
+#### Scenario: README updated in later PR
+- **WHEN** a later PR changes README content
+- **THEN** the new README prose is written in Chinese and technical identifiers remain accurate
+
 ### Requirement: Attribute third-party dependencies
 The project MUST list third-party libraries, frameworks, APIs, and reused code sources in README or dedicated documentation.
 
