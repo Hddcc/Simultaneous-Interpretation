@@ -19,6 +19,43 @@ interface FloatingCaptionState {
   updatedAtMs: number;
 }
 
+interface AiRuntimeConfig {
+  provider: "mock" | "openai" | "custom";
+  asrMode: "mock" | "provider";
+  asrModel: string;
+  translationModel: string;
+  hasOpenAiKey: boolean;
+}
+
+interface TranslateTextRequest {
+  text: string;
+  sourceLanguage: string;
+  targetLanguage: string;
+  model?: string;
+  context?: Array<{
+    sourceText: string;
+    translatedText: string;
+  }>;
+}
+
+interface TranslateTextResponse {
+  text: string;
+  model: string;
+  latencyMs: number;
+}
+
+interface TranscribeLocalMediaFileRequest {
+  filePath: string;
+  languageCode: string;
+  model?: string;
+}
+
+interface TranscribeLocalMediaFileResponse {
+  text: string;
+  model: string;
+  latencyMs: number;
+}
+
 contextBridge.exposeInMainWorld("simultaneousInterpretation", {
   appName: "声桥 LinguaBridge",
   version: "0.1.0",
@@ -29,6 +66,10 @@ contextBridge.exposeInMainWorld("simultaneousInterpretation", {
   closeFloatingCaption: () => ipcRenderer.invoke("floating-caption:close"),
   configureFloatingCaption: (options: FloatingCaptionOptions) =>
     ipcRenderer.invoke("floating-caption:configure", options),
+  getAiRuntimeConfig: () => ipcRenderer.invoke("ai:get-runtime-config"),
+  translateText: (request: TranslateTextRequest) => ipcRenderer.invoke("ai:translate-text", request),
+  transcribeLocalMediaFile: (request: TranscribeLocalMediaFileRequest) =>
+    ipcRenderer.invoke("ai:transcribe-local-media-file", request),
   updateFloatingCaption: (state: FloatingCaptionState) =>
     ipcRenderer.send("floating-caption:update", state),
   onFloatingCaptionUpdate: (callback: (state: FloatingCaptionState) => void) => {

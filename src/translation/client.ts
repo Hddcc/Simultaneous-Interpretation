@@ -1,4 +1,5 @@
 import type { TranslationClient, TranslationRequest } from "./types";
+import type { TranslationEvent } from "./types";
 
 const ENGLISH_TO_CHINESE: Record<string, string> = {
   "Welcome to today's session about realtime speech systems.":
@@ -34,37 +35,76 @@ function createFallbackTranslation(request: TranslationRequest): string {
     : request.segment.text;
 }
 
+function createBaseTranslationEvent(
+  request: TranslationRequest,
+  translatedText: string,
+  latencyMs: number
+): TranslationEvent {
+  const createdAtMs = Date.now();
+  const revisionReason =
+    request.segment.revision === 1
+      ? "initial"
+      : request.segment.status === "final"
+        ? "translation-correction"
+        : "asr-correction";
+
+  return {
+    id: `translation-${request.segment.id}-${request.segment.status}-${request.segment.revision}`,
+    segmentId: request.segment.id,
+    sourceText: request.segment.text,
+    translatedText,
+    languagePairId: request.languagePair.id,
+    sourceLanguage: request.languagePair.source.label,
+    targetLanguage: request.languagePair.target.label,
+    status: request.segment.status === "final" ? "translated" : "partial",
+    revision: request.segment.revision,
+    revisionReason,
+    createdAtMs,
+    latencyMs,
+    contextSize: request.context.length
+  };
+}
+
+function createMockTranslationEvent(request: TranslationRequest) {
+  const dictionary =
+    request.languagePair.target.code === "zh-CN" ? ENGLISH_TO_CHINESE : CHINESE_TO_ENGLISH;
+  const translatedText = dictionary[request.segment.text] ?? createFallbackTranslation(request);
+  const latencyMs = 420 + request.context.length * 60;
+
+  return createBaseTranslationEvent(request, translatedText, latencyMs);
+}
+
+async function createProviderTranslationEvent(request: TranslationRequest) {
+  const api = window.simultaneousInterpretation;
+
+  if (!api?.translateText || request.segment.status !== "final") {
+    return createMockTranslationEvent(request);
+  }
+
+  try {
+    const response = await api.translateText({
+      text: request.segment.text,
+      sourceLanguage: request.languagePair.source.translationLocale,
+      targetLanguage: request.languagePair.target.translationLocale,
+      model: request.languagePair.translationModel,
+      context: request.context
+    });
+
+    return createBaseTranslationEvent(request, response.text, response.latencyMs);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "真实翻译服务调用失败。";
+    return createBaseTranslationEvent(request, `翻译服务暂不可用：${message}`, 0);
+  }
+}
+
 export function createTranslationClient(): TranslationClient {
   return {
     translate(request: TranslationRequest) {
-      const dictionary =
-        request.languagePair.target.code === "zh-CN" ? ENGLISH_TO_CHINESE : CHINESE_TO_ENGLISH;
-      const translatedText =
-        dictionary[request.segment.text] ?? createFallbackTranslation(request);
-      const latencyMs = 420 + request.context.length * 60;
-      const createdAtMs = Date.now();
-      const revisionReason =
-        request.segment.revision === 1
-          ? "initial"
-          : request.segment.status === "final"
-            ? "translation-correction"
-            : "asr-correction";
+      if (import.meta.env.VITE_AI_PROVIDER === "openai") {
+        return createProviderTranslationEvent(request);
+      }
 
-      return {
-        id: `translation-${request.segment.id}-${request.segment.status}-${request.segment.revision}`,
-        segmentId: request.segment.id,
-        sourceText: request.segment.text,
-        translatedText,
-        languagePairId: request.languagePair.id,
-        sourceLanguage: request.languagePair.source.label,
-        targetLanguage: request.languagePair.target.label,
-        status: request.segment.status === "final" ? "translated" : "partial",
-        revision: request.segment.revision,
-        revisionReason,
-        createdAtMs,
-        latencyMs,
-        contextSize: request.context.length
-      };
+      return Promise.resolve(createMockTranslationEvent(request));
     }
   };
 }
