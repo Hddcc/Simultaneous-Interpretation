@@ -80,11 +80,11 @@
 
 ## 11. PR 11 - README, Demo, and Review Deliverables
 
-- [ ] 11.1 Expand README in Chinese with project purpose, feature list, setup, API key configuration, run commands, and troubleshooting.
-- [ ] 11.2 Document third-party frameworks, libraries, APIs, and original project functionality.
-- [ ] 11.3 Add demo script or demo notes covering system audio, file simulation, English to Chinese, Chinese to English, and subtitle correction.
-- [ ] 11.4 Add or link the demo video deliverable according to coursework requirements.
-- [ ] 11.5 Prepare a PR description focused only on documentation and demo readiness.
+- [x] 11.1 Expand README in Chinese with project purpose, feature list, setup, API key configuration, run commands, and troubleshooting.
+- [x] 11.2 Document third-party frameworks, libraries, APIs, and original project functionality.
+- [x] 11.3 Add demo script or demo notes covering system audio, file simulation, English to Chinese, Chinese to English, and subtitle correction.
+- [x] 11.4 Add or link the demo video deliverable according to coursework requirements.
+- [x] 11.5 Prepare a PR description focused only on documentation and demo readiness.
 
 ## 12. PR 12 - Final Verification and Submission Hygiene
 

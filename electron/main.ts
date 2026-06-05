@@ -81,7 +81,7 @@ function createMainWindow(): void {
     height: 720,
     minWidth: 960,
     minHeight: 600,
-    title: "Simultaneous Interpretation",
+    title: "声桥 LinguaBridge",
     backgroundColor: "#0f172a",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
