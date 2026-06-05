@@ -40,11 +40,11 @@
 
 ## 6. PR 6 - Realtime ASR Integration
 
-- [ ] 6.1 Add AI provider configuration loading from environment variables without committing secrets.
-- [ ] 6.2 Implement streaming ASR client integration for normalized audio chunks.
-- [ ] 6.3 Model partial and final ASR events with segment IDs, timestamps, and status.
-- [ ] 6.4 Render live source-text updates in the workbench for file or microphone input.
-- [ ] 6.5 Prepare a PR description focused only on realtime ASR integration and verification.
+- [x] 6.1 Add AI provider configuration loading from environment variables without committing secrets.
+- [x] 6.2 Implement streaming ASR client integration for normalized audio chunks.
+- [x] 6.3 Model partial and final ASR events with segment IDs, timestamps, and status.
+- [x] 6.4 Render live source-text updates in the workbench for file or microphone input.
+- [x] 6.5 Prepare a PR description focused only on realtime ASR integration and verification.
 
 ## 7. PR 7 - Bilingual Translation Pipeline
 

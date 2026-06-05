@@ -5,6 +5,9 @@ import {
   createSimulatedChunk,
   formatTimestamp
 } from "./audio/simulator";
+import { createStreamingAsrClient } from "./asr/client";
+import { loadAsrConfig } from "./asr/config";
+import type { AsrEvent, AsrSegment } from "./asr/types";
 import type {
   AudioSessionState,
   AudioSourceOption,
@@ -88,11 +91,15 @@ export function App() {
   const [selectedMicrophoneId, setSelectedMicrophoneId] = useState("");
   const [desktopSources, setDesktopSources] = useState<DesktopAudioSource[]>([]);
   const [selectedDesktopSourceId, setSelectedDesktopSourceId] = useState("");
+  const [asrEvents, setAsrEvents] = useState<AsrEvent[]>([]);
+  const [asrSegments, setAsrSegments] = useState<AsrSegment[]>([]);
 
   const chunkSequenceRef = useRef(0);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const captureTimerRef = useRef<number | null>(null);
+  const languageDirectionRef = useRef(languageDirection);
+  const asrClientRef = useRef(createStreamingAsrClient(loadAsrConfig()));
 
   const selectedSource = useMemo(
     () => sourceOptions.find((option) => option.type === session.sourceType) ?? sourceOptions[0],
@@ -105,6 +112,10 @@ export function App() {
 
   const selectedDesktopSourceName =
     desktopSources.find((source) => source.id === selectedDesktopSourceId)?.name ?? "默认桌面源";
+
+  const latestAsrSegment = asrSegments[0];
+  const latestAsrEvent = asrEvents[0];
+  const asrConfig = asrClientRef.current.getConfig();
 
   useEffect(() => {
     if (session.status !== "streaming" || session.sourceType !== "file") {
@@ -126,6 +137,10 @@ export function App() {
     };
   }, []);
 
+  useEffect(() => {
+    languageDirectionRef.current = languageDirection;
+  }, [languageDirection]);
+
   function recordChunk(chunk: NormalizedAudioChunk): void {
     setSession((current) => ({
       ...current,
@@ -135,11 +150,50 @@ export function App() {
       error: null
     }));
     setRecentChunks((current) => [chunk, ...current].slice(0, 5));
+    publishAsrEvents(chunk);
+  }
+
+  function publishAsrEvents(chunk: NormalizedAudioChunk): void {
+    const nextEvents = asrClientRef.current.pushChunk(chunk, languageDirectionRef.current);
+
+    if (nextEvents.length === 0) {
+      return;
+    }
+
+    setAsrEvents((current) => [...nextEvents, ...current].slice(0, 8));
+    setAsrSegments((current) => {
+      const byId = new Map(current.map((segment) => [segment.id, segment]));
+
+      nextEvents.forEach((event) => {
+        byId.set(event.segmentId, {
+          id: event.segmentId,
+          sourceType: event.sourceType,
+          text: event.text,
+          status: event.status,
+          startedAtMs: event.audioStartMs,
+          endedAtMs: event.audioEndMs,
+          updatedAtMs: event.receivedAtMs,
+          latencyMs: event.latencyMs,
+          revision: event.revision
+        });
+      });
+
+      return Array.from(byId.values())
+        .sort((left, right) => right.startedAtMs - left.startedAtMs)
+        .slice(0, 6);
+    });
+  }
+
+  function resetAsrState(): void {
+    asrClientRef.current.reset();
+    setAsrEvents([]);
+    setAsrSegments([]);
   }
 
   function resetInputState(type: AudioSourceType): void {
     chunkSequenceRef.current = 0;
     setRecentChunks([]);
+    resetAsrState();
     setSession((current) => ({
       ...current,
       sourceType: type,
@@ -297,6 +351,7 @@ export function App() {
       cleanupActiveCapture();
       chunkSequenceRef.current = 0;
       setRecentChunks([]);
+      resetAsrState();
 
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: selectedMicrophoneId
@@ -342,6 +397,7 @@ export function App() {
       cleanupActiveCapture();
       chunkSequenceRef.current = 0;
       setRecentChunks([]);
+      resetAsrState();
 
       const desktopConstraints = createDesktopConstraints(sourceId);
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -393,6 +449,7 @@ export function App() {
 
     chunkSequenceRef.current = 0;
     setRecentChunks([]);
+    resetAsrState();
     setSession((current) => ({
       ...current,
       sourceType: "file",
@@ -450,6 +507,11 @@ export function App() {
     { label: "音频源", value: getSourceLabel(session.sourceType) },
     { label: "输入状态", value: session.status },
     { label: "音频块", value: String(session.chunksProduced) },
+    { label: "ASR", value: `${asrConfig.provider}/${asrConfig.model}` },
+    {
+      label: "识别延迟",
+      value: latestAsrEvent ? `${latestAsrEvent.latencyMs} ms` : "等待识别"
+    },
     { label: "音量", value: `${Math.round(session.volume * 100)}%` },
     { label: "语言方向", value: languageDirection }
   ];
@@ -513,16 +575,32 @@ export function App() {
           </div>
 
           <div className="caption-stage" aria-live="polite">
-            <p className="source-caption">{selectedSource.description}</p>
-            <p className="translated-caption">
-              {session.sourceType === "system"
-                ? `当前来源：${selectedDesktopSourceName}`
-                : session.sourceType === "microphone"
-                  ? `当前设备：${selectedMicrophoneLabel}`
-                  : session.selectedFile
-                    ? `已选择 ${session.selectedFile.name}`
-                    : "选择音频源后，可先用文件模拟、麦克风或系统音频验证实时输入链路。"}
+            <p className="source-caption">
+              {latestAsrSegment
+                ? latestAsrSegment.status === "final"
+                  ? "原文识别已确认"
+                  : "原文识别更新中"
+                : selectedSource.description}
             </p>
+            <p className="translated-caption asr-caption">
+              {latestAsrSegment
+                ? latestAsrSegment.text
+                : session.sourceType === "system"
+                  ? `当前来源：${selectedDesktopSourceName}`
+                  : session.sourceType === "microphone"
+                    ? `当前设备：${selectedMicrophoneLabel}`
+                    : session.selectedFile
+                      ? `已选择 ${session.selectedFile.name}`
+                      : "选择音频源后，可先用文件模拟、麦克风或系统音频验证实时输入链路。"}
+            </p>
+            {latestAsrSegment ? (
+              <div className="asr-detail-row" aria-label="识别事件状态">
+                <span>{latestAsrSegment.status === "final" ? "Final" : "Partial"}</span>
+                <span>片段 {latestAsrSegment.id.replace("asr-segment-", "#")}</span>
+                <span>版本 {latestAsrSegment.revision}</span>
+                <span>{latestAsrSegment.latencyMs} ms</span>
+              </div>
+            ) : null}
             {session.error ? <p className="error-message">{session.error}</p> : null}
           </div>
 
@@ -620,30 +698,28 @@ export function App() {
           </div>
 
           <div className="history-list">
-            {recentChunks.length === 0 ? (
+            {asrSegments.length === 0 ? (
               <article className="history-item">
                 <div className="history-meta">
                   <time>--:--</time>
                   <span>等待</span>
                 </div>
-                <p className="history-source">暂无音频块</p>
+                <p className="history-source">暂无识别文本</p>
                 <p className="history-translation">
-                  开始文件模拟、麦克风或系统音频采集后，这里会显示实时 chunk 元数据。
+                  开始文件模拟、麦克风或系统音频采集后，这里会显示实时 ASR 片段。
                 </p>
               </article>
             ) : (
-              recentChunks.map((chunk) => (
-                <article className="history-item" key={chunk.id}>
+              asrSegments.map((segment) => (
+                <article className="history-item" key={segment.id}>
                   <div className="history-meta">
-                    <time>{formatTimestamp(chunk.timestampMs)}</time>
-                    <span>#{chunk.sequence + 1}</span>
+                    <time>{formatTimestamp(segment.startedAtMs)}</time>
+                    <span>{segment.status === "final" ? "Final" : "Partial"}</span>
                   </div>
-                  <p className="history-source">
-                    {chunk.fileName ?? chunk.deviceLabel ?? getSourceLabel(chunk.sourceType)}
-                  </p>
+                  <p className="history-source">{segment.text}</p>
                   <p className="history-translation">
-                    {chunk.durationMs} ms · {chunk.sampleRate} Hz · 音量{" "}
-                    {Math.round(chunk.volume * 100)}%
+                    {getSourceLabel(segment.sourceType)} · 版本 {segment.revision} · 延迟{" "}
+                    {segment.latencyMs} ms
                   </p>
                 </article>
               ))
