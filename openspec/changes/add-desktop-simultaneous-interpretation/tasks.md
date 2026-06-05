@@ -8,11 +8,11 @@
 
 ## 2. PR 2 - Main Workbench UI Shell
 
-- [ ] 2.1 Build the main desktop workbench layout with top controls, central subtitle area, side history panel, and bottom status strip.
-- [ ] 2.2 Add placeholder states for audio source, language direction, session status, latency, and service connection.
-- [ ] 2.3 Apply accessible UI styling with readable contrast, visible labels, stable button states, and restrained loading indicators.
-- [ ] 2.4 Verify the UI renders correctly at common desktop window sizes.
-- [ ] 2.5 Prepare a PR description focused only on the workbench UI shell.
+- [x] 2.1 Build the main desktop workbench layout with top controls, central subtitle area, side history panel, and bottom status strip.
+- [x] 2.2 Add placeholder states for audio source, language direction, session status, latency, and service connection.
+- [x] 2.3 Apply accessible UI styling with readable contrast, visible labels, stable button states, and restrained loading indicators.
+- [x] 2.4 Verify the UI renders correctly at common desktop window sizes.
+- [x] 2.5 Prepare a PR description focused only on the workbench UI shell.
 
 ## 3. PR 3 - Audio Source Selection and File Simulation
 
@@ -80,7 +80,7 @@
 
 ## 11. PR 11 - README, Demo, and Review Deliverables
 
-- [ ] 11.1 Expand README with project purpose, feature list, setup, API key configuration, run commands, and troubleshooting.
+- [ ] 11.1 Expand README in Chinese with project purpose, feature list, setup, API key configuration, run commands, and troubleshooting.
 - [ ] 11.2 Document third-party frameworks, libraries, APIs, and original project functionality.
 - [ ] 11.3 Add demo script or demo notes covering system audio, file simulation, English to Chinese, Chinese to English, and subtitle correction.
 - [ ] 11.4 Add or link the demo video deliverable according to coursework requirements.

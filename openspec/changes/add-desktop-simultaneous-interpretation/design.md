@@ -87,6 +87,8 @@ The UI should use professional tool styling: strong readability, stable controls
 
 Tasks MUST be split by PR. Each PR should add or modify a single functional slice, include a clear PR description, and remain runnable after merge. The tasks file will list PR-sized task groups so `/opsx:apply` can be run multiple times without bundling the whole project into one final PR.
 
+README documentation and future README updates MUST be written in Chinese. Technical identifiers such as commands, dependency names, API names, environment variables, and file paths should retain their original spelling for accuracy.
+
 ## Risks / Trade-offs
 
 - System audio capture varies across operating systems and device configurations -> prioritize Windows system playback for the first demo, provide microphone and file simulation fallback, and document limitations.
@@ -103,6 +105,7 @@ Tasks MUST be split by PR. Each PR should add or modify a single functional slic
 3. Implement each capability through small PR-sized apply cycles.
 4. Keep `main` runnable after each merge.
 5. Add README, demo assets, and dependency attribution before final submission.
+6. Keep README content in Chinese throughout later PRs.
 
 Rollback for each implementation PR is a standard Git revert of that PR. No data migration is expected in the MVP.
 
