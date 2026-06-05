@@ -15,6 +15,11 @@ export interface LocalMediaFile {
   extension: string;
 }
 
+export interface MicrophoneDevice {
+  deviceId: string;
+  label: string;
+}
+
 export interface NormalizedAudioChunk {
   id: string;
   sourceType: AudioSourceType;
@@ -24,8 +29,9 @@ export interface NormalizedAudioChunk {
   sampleRate: number;
   channels: number;
   volume: number;
-  status: "simulated";
+  status: "simulated" | "captured";
   fileName?: string;
+  deviceLabel?: string;
 }
 
 export interface AudioSessionState {

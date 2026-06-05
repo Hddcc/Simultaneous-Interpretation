@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, session } from "electron";
 import { stat } from "node:fs/promises";
 import path from "node:path";
 
@@ -30,7 +30,7 @@ function createMainWindow(): void {
 
 ipcMain.handle("dialog:select-local-media-file", async () => {
   const result = await dialog.showOpenDialog({
-    title: "选择用于模拟实时输入的音频或视频文件",
+    title: "Select a media file for realtime simulation",
     properties: ["openFile"],
     filters: [
       {
@@ -57,6 +57,10 @@ ipcMain.handle("dialog:select-local-media-file", async () => {
 });
 
 app.whenReady().then(() => {
+  session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
+    callback(permission === "media");
+  });
+
   createMainWindow();
 
   app.on("activate", () => {

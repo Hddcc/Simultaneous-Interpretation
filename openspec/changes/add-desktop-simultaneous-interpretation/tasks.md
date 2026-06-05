@@ -24,11 +24,11 @@
 
 ## 4. PR 4 - Microphone Capture
 
-- [ ] 4.1 Implement microphone permission handling and device selection.
-- [ ] 4.2 Convert microphone input into normalized timestamped audio chunks.
-- [ ] 4.3 Add capture start, pause, stop, and error handling for microphone sessions.
-- [ ] 4.4 Verify microphone input shows volume activity and emits chunks through the shared stream contract.
-- [ ] 4.5 Prepare a PR description focused only on microphone capture.
+- [x] 4.1 Implement microphone permission handling and device selection.
+- [x] 4.2 Convert microphone input into normalized timestamped audio chunks.
+- [x] 4.3 Add capture start, pause, stop, and error handling for microphone sessions.
+- [x] 4.4 Verify microphone input shows volume activity and emits chunks through the shared stream contract.
+- [x] 4.5 Prepare a PR description focused only on microphone capture.
 
 ## 5. PR 5 - System Audio Capture
 
