@@ -56,19 +56,19 @@
 
 ## 8. PR 8 - Revision-Aware Subtitle Updates
 
-- [ ] 8.1 Implement versioned subtitle segments with stable IDs and revision numbers.
-- [ ] 8.2 Update visible subtitles in place when ASR or translation corrections arrive.
-- [ ] 8.3 Add a configurable recent revision window and preserve older visible subtitles.
-- [ ] 8.4 Add subtle UI indication for revised subtitles and record revision status in session history.
-- [ ] 8.5 Prepare a PR description focused only on subtitle correction behavior.
+- [x] 8.1 Implement versioned subtitle segments with stable IDs and revision numbers.
+- [x] 8.2 Update visible subtitles in place when ASR or translation corrections arrive.
+- [x] 8.3 Add a configurable recent revision window and preserve older visible subtitles.
+- [x] 8.4 Add subtle UI indication for revised subtitles and record revision status in session history.
+- [x] 8.5 Prepare a PR description focused only on subtitle correction behavior.
 
 ## 9. PR 9 - Floating Caption Window
 
-- [ ] 9.1 Implement a separate floating caption window that can stay visible above other applications.
-- [ ] 9.2 Add controls to open, close, resize, and reposition the floating caption window.
-- [ ] 9.3 Stream current translated subtitle and basic session status into the floating window.
-- [ ] 9.4 Verify floating captions remain usable while the user focuses a browser, meeting app, or media player.
-- [ ] 9.5 Prepare a PR description focused only on floating caption experience.
+- [x] 9.1 Implement a separate floating caption window that can stay visible above other applications.
+- [x] 9.2 Add controls to open, close, resize, and reposition the floating caption window.
+- [x] 9.3 Stream current translated subtitle and basic session status into the floating window.
+- [x] 9.4 Verify floating captions remain usable while the user focuses a browser, meeting app, or media player.
+- [x] 9.5 Prepare a PR description focused only on floating caption experience.
 
 ## 10. PR 10 - Optional TTS Output
 

@@ -54,6 +54,19 @@ const initialSession: AudioSessionState = {
   error: null
 };
 
+const RECENT_REVISION_WINDOW = 4;
+
+const defaultFloatingCaptionState: FloatingCaptionState = {
+  translatedText: "等待字幕",
+  sourceText: "开始输入后，这里会显示实时字幕。",
+  statusLabel: "等待输入",
+  languageDirection: "英语 -> 中文",
+  sessionStatus: "idle",
+  latencyLabel: "等待字幕",
+  revised: false,
+  updatedAtMs: Date.now()
+};
+
 function formatFileSize(bytes: number): string {
   if (bytes < 1024 * 1024) {
     return `${Math.max(1, Math.round(bytes / 1024))} KB`;
@@ -64,6 +77,18 @@ function formatFileSize(bytes: number): string {
 
 function getSourceLabel(type: AudioSourceType): string {
   return sourceOptions.find((option) => option.type === type)?.label ?? type;
+}
+
+function getRevisionReasonLabel(reason: SubtitleSegment["revisionReason"]): string {
+  if (reason === "asr-correction") {
+    return "原文更新";
+  }
+
+  if (reason === "translation-correction") {
+    return "译文优化";
+  }
+
+  return "初始版本";
 }
 
 function getVolumeFromAnalyser(analyser: AnalyserNode): number {
@@ -79,6 +104,34 @@ function getVolumeFromAnalyser(analyser: AnalyserNode): number {
   return Math.min(1, Math.sqrt(sum / samples.length) * 3);
 }
 
+function isFloatingCaptionWindow(): boolean {
+  return new URLSearchParams(window.location.search).get("window") === "floating";
+}
+
+function FloatingCaptionWindow() {
+  const appInfo = window.simultaneousInterpretation;
+  const [caption, setCaption] = useState<FloatingCaptionState>(defaultFloatingCaptionState);
+
+  useEffect(() => {
+    return appInfo?.onFloatingCaptionUpdate?.((state) => setCaption(state));
+  }, [appInfo]);
+
+  return (
+    <main className={`floating-caption-shell ${caption.revised ? "floating-revised" : ""}`}>
+      <div className="floating-caption-top">
+        <span>{caption.statusLabel}</span>
+        <span>{caption.languageDirection}</span>
+      </div>
+      <p className="floating-source">{caption.sourceText}</p>
+      <p className="floating-translation">{caption.translatedText}</p>
+      <div className="floating-caption-bottom">
+        <span>{caption.sessionStatus}</span>
+        <span>{caption.latencyLabel}</span>
+      </div>
+    </main>
+  );
+}
+
 function createDesktopConstraints(sourceId: string): MediaTrackConstraints {
   return {
     mandatory: {
@@ -90,6 +143,11 @@ function createDesktopConstraints(sourceId: string): MediaTrackConstraints {
 
 export function App() {
   const appInfo = window.simultaneousInterpretation;
+
+  if (isFloatingCaptionWindow()) {
+    return <FloatingCaptionWindow />;
+  }
+
   const [session, setSession] = useState<AudioSessionState>(initialSession);
   const [activeLanguagePair, setActiveLanguagePair] = useState(loadPreferredLanguagePair);
   const [recentChunks, setRecentChunks] = useState<NormalizedAudioChunk[]>([]);
@@ -101,6 +159,10 @@ export function App() {
   const [asrSegments, setAsrSegments] = useState<AsrSegment[]>([]);
   const [translationEvents, setTranslationEvents] = useState<TranslationEvent[]>([]);
   const [subtitleSegments, setSubtitleSegments] = useState<SubtitleSegment[]>([]);
+  const [floatingCaptionVisible, setFloatingCaptionVisible] = useState(false);
+  const [floatingLayout, setFloatingLayout] = useState<FloatingCaptionLayout>("standard");
+  const [floatingPosition, setFloatingPosition] =
+    useState<FloatingCaptionPosition>("bottom-right");
 
   const chunkSequenceRef = useRef(0);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -129,6 +191,41 @@ export function App() {
   const latestTranslationEvent = translationEvents[0];
   const asrConfig = asrClientRef.current.getConfig();
 
+  const floatingCaptionState = useMemo<FloatingCaptionState>(
+    () => ({
+      translatedText:
+        latestSubtitleSegment?.translatedText ??
+        (latestAsrSegment ? "正在等待稳定片段生成译文" : "等待字幕"),
+      sourceText: latestSubtitleSegment?.sourceText ?? latestAsrSegment?.text ?? selectedSource.description,
+      statusLabel: latestSubtitleSegment
+        ? latestSubtitleSegment.revised
+          ? "字幕已修订"
+          : latestSubtitleSegment.status === "partial"
+            ? "临时字幕"
+            : "实时字幕"
+        : session.status === "streaming"
+          ? "识别中"
+          : "等待输入",
+      languageDirection: activeLanguagePair.label,
+      sessionStatus: session.status,
+      latencyLabel: latestSubtitleSegment
+        ? `${latestSubtitleSegment.totalLatencyMs} ms`
+        : latestAsrEvent
+          ? `${latestAsrEvent.latencyMs} ms`
+          : "等待字幕",
+      revised: Boolean(latestSubtitleSegment?.revised),
+      updatedAtMs: Date.now()
+    }),
+    [
+      activeLanguagePair.label,
+      latestAsrEvent,
+      latestAsrSegment,
+      latestSubtitleSegment,
+      selectedSource.description,
+      session.status
+    ]
+  );
+
   useEffect(() => {
     if (session.status !== "streaming" || session.sourceType !== "file") {
       return undefined;
@@ -153,6 +250,10 @@ export function App() {
     languagePairRef.current = activeLanguagePair;
     savePreferredLanguagePair(activeLanguagePair.id);
   }, [activeLanguagePair]);
+
+  useEffect(() => {
+    appInfo?.updateFloatingCaption?.(floatingCaptionState);
+  }, [appInfo, floatingCaptionState]);
 
   function recordChunk(chunk: NormalizedAudioChunk): void {
     setSession((current) => ({
@@ -198,15 +299,15 @@ export function App() {
         .slice(0, 6);
     });
 
-    publishTranslationEvents(nextSegments.filter((segment) => segment.status === "final"));
+    publishTranslationEvents(nextSegments);
   }
 
-  function publishTranslationEvents(finalSegments: AsrSegment[]): void {
-    if (finalSegments.length === 0) {
+  function publishTranslationEvents(changedSegments: AsrSegment[]): void {
+    if (changedSegments.length === 0) {
       return;
     }
 
-    const nextEvents = finalSegments.map((segment) =>
+    const nextEvents = changedSegments.map((segment) =>
       translationClientRef.current.translate({
         segment,
         languagePair: languagePairRef.current,
@@ -225,11 +326,27 @@ export function App() {
       const byId = new Map(current.map((segment) => [segment.id, segment]));
 
       nextEvents.forEach((event) => {
-        const asrSegment = finalSegments.find((segment) => segment.id === event.segmentId);
+        const asrSegment = changedSegments.find((segment) => segment.id === event.segmentId);
 
         if (!asrSegment) {
           return;
         }
+
+        const existing = byId.get(event.segmentId);
+        const currentIndex = current.findIndex((segment) => segment.id === event.segmentId);
+        const canRevise =
+          !existing || (currentIndex >= 0 && currentIndex < RECENT_REVISION_WINDOW);
+
+        if (existing && !canRevise) {
+          return;
+        }
+
+        const revision = existing ? existing.revision + 1 : event.revision;
+        const status = existing
+          ? "revised"
+          : asrSegment.status === "final"
+            ? "final"
+            : "partial";
 
         byId.set(event.segmentId, {
           id: event.segmentId,
@@ -237,15 +354,17 @@ export function App() {
           translatedText: event.translatedText,
           sourceLanguage: event.sourceLanguage,
           targetLanguage: event.targetLanguage,
-          status: event.status,
-          revision: event.revision,
+          status,
+          revision,
+          revisionReason: existing ? event.revisionReason : "initial",
           startedAtMs: asrSegment.startedAtMs,
           endedAtMs: asrSegment.endedAtMs,
           updatedAtMs: event.createdAtMs,
           asrLatencyMs: asrSegment.latencyMs,
           translationLatencyMs: event.latencyMs,
           totalLatencyMs: asrSegment.latencyMs + event.latencyMs,
-          contextSize: event.contextSize
+          contextSize: event.contextSize,
+          revised: Boolean(existing)
         });
       });
 
@@ -585,6 +704,48 @@ export function App() {
     }));
   }
 
+  async function openFloatingCaption(): Promise<void> {
+    if (!appInfo?.openFloatingCaption) {
+      setSession((current) => ({
+        ...current,
+        error: "当前运行环境无法打开悬浮字幕窗口。"
+      }));
+      return;
+    }
+
+    const result = await appInfo.openFloatingCaption({
+      layout: floatingLayout,
+      position: floatingPosition
+    });
+    setFloatingCaptionVisible(result.visible);
+    appInfo.updateFloatingCaption?.(floatingCaptionState);
+  }
+
+  async function closeFloatingCaption(): Promise<void> {
+    const result = await appInfo?.closeFloatingCaption?.();
+    setFloatingCaptionVisible(Boolean(result?.visible));
+  }
+
+  function updateFloatingLayout(layout: FloatingCaptionLayout): void {
+    setFloatingLayout(layout);
+    if (floatingCaptionVisible) {
+      void appInfo?.configureFloatingCaption?.({
+        layout,
+        position: floatingPosition
+      });
+    }
+  }
+
+  function updateFloatingPosition(position: FloatingCaptionPosition): void {
+    setFloatingPosition(position);
+    if (floatingCaptionVisible) {
+      void appInfo?.configureFloatingCaption?.({
+        layout: floatingLayout,
+        position
+      });
+    }
+  }
+
   const metrics = [
     { label: "音频源", value: getSourceLabel(session.sourceType) },
     { label: "输入状态", value: session.status },
@@ -599,6 +760,8 @@ export function App() {
           : "等待字幕"
     },
     { label: "音量", value: `${Math.round(session.volume * 100)}%` },
+    { label: "修订窗口", value: `${RECENT_REVISION_WINDOW} 条` },
+    { label: "悬浮窗", value: floatingCaptionVisible ? "已打开" : "未打开" },
     { label: "语言方向", value: activeLanguagePair.label }
   ];
 
@@ -670,7 +833,11 @@ export function App() {
                   ? latestAsrSegment.text
                 : selectedSource.description}
             </p>
-            <p className="translated-caption">
+            <p
+              className={`translated-caption ${
+                latestSubtitleSegment?.revised ? "caption-revised" : ""
+              }`}
+            >
               {latestSubtitleSegment
                 ? latestSubtitleSegment.translatedText
                 : latestAsrSegment
@@ -685,7 +852,15 @@ export function App() {
             </p>
             {latestSubtitleSegment || latestAsrSegment ? (
               <div className="asr-detail-row" aria-label="识别事件状态">
-                <span>{latestSubtitleSegment ? "Translated" : "ASR"}</span>
+                <span>
+                  {latestSubtitleSegment
+                    ? latestSubtitleSegment.status === "partial"
+                      ? "Partial"
+                      : latestSubtitleSegment.revised
+                        ? "已修订"
+                        : "Translated"
+                    : "ASR"}
+                </span>
                 <span>
                   {latestSubtitleSegment
                     ? `${latestSubtitleSegment.sourceLanguage} -> ${latestSubtitleSegment.targetLanguage}`
@@ -702,9 +877,12 @@ export function App() {
                 </span>
                 <span>
                   {latestSubtitleSegment
-                    ? `${latestSubtitleSegment.totalLatencyMs} ms`
+                    ? `版本 ${latestSubtitleSegment.revision}`
                     : `${latestAsrSegment?.latencyMs ?? 0} ms`}
                 </span>
+                {latestSubtitleSegment ? (
+                  <span>{latestSubtitleSegment.totalLatencyMs} ms</span>
+                ) : null}
               </div>
             ) : null}
             {session.error ? <p className="error-message">{session.error}</p> : null}
@@ -773,6 +951,46 @@ export function App() {
             </div>
           </div>
 
+          <div className="floating-controls" aria-label="悬浮字幕控制">
+            <button
+              type="button"
+              className="secondary-action"
+              onClick={() => void openFloatingCaption()}
+            >
+              打开悬浮字幕
+            </button>
+            <button
+              type="button"
+              className="secondary-action"
+              onClick={() => void closeFloatingCaption()}
+            >
+              关闭悬浮字幕
+            </button>
+            <select
+              className="inline-select"
+              value={floatingLayout}
+              aria-label="悬浮字幕尺寸"
+              onChange={(event) => updateFloatingLayout(event.target.value as FloatingCaptionLayout)}
+            >
+              <option value="compact">紧凑</option>
+              <option value="standard">标准</option>
+              <option value="wide">宽屏</option>
+            </select>
+            <select
+              className="inline-select"
+              value={floatingPosition}
+              aria-label="悬浮字幕位置"
+              onChange={(event) =>
+                updateFloatingPosition(event.target.value as FloatingCaptionPosition)
+              }
+            >
+              <option value="top-left">左上</option>
+              <option value="top-right">右上</option>
+              <option value="bottom-left">左下</option>
+              <option value="bottom-right">右下</option>
+            </select>
+          </div>
+
           <div className="placeholder-row" aria-label="输入源状态">
             <span>统一音频块：16 kHz / mono / 500 ms</span>
             <span>
@@ -817,18 +1035,27 @@ export function App() {
               </article>
             ) : (
               subtitleSegments.map((segment) => (
-                <article className="history-item" key={segment.id}>
+                <article
+                  className={`history-item ${segment.revised ? "history-item-revised" : ""}`}
+                  key={segment.id}
+                >
                   <div className="history-meta">
                     <time>{formatTimestamp(segment.startedAtMs)}</time>
-                    <span>{`${segment.sourceLanguage} -> ${segment.targetLanguage}`}</span>
+                    <span>
+                      {segment.revised
+                        ? "已修订"
+                        : segment.status === "partial"
+                          ? "临时字幕"
+                          : `${segment.sourceLanguage} -> ${segment.targetLanguage}`}
+                    </span>
                   </div>
                   <p className="history-source">{segment.sourceText}</p>
                   <p className="history-translation">
                     {segment.translatedText}
                   </p>
                   <p className="history-footnote">
-                    版本 {segment.revision} · 上下文 {segment.contextSize} · 延迟{" "}
-                    {segment.totalLatencyMs} ms
+                    版本 {segment.revision} · {getRevisionReasonLabel(segment.revisionReason)} ·
+                    上下文 {segment.contextSize} · 延迟 {segment.totalLatencyMs} ms
                   </p>
                 </article>
               ))

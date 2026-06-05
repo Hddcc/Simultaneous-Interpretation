@@ -21,8 +21,9 @@ export interface TranslationEvent {
   languagePairId: string;
   sourceLanguage: string;
   targetLanguage: string;
-  status: "translated";
+  status: "partial" | "translated" | "revised";
   revision: number;
+  revisionReason: "initial" | "asr-correction" | "translation-correction";
   createdAtMs: number;
   latencyMs: number;
   contextSize: number;
@@ -34,8 +35,9 @@ export interface SubtitleSegment {
   translatedText: string;
   sourceLanguage: string;
   targetLanguage: string;
-  status: "translated";
+  status: "partial" | "final" | "revised";
   revision: number;
+  revisionReason: "initial" | "asr-correction" | "translation-correction";
   startedAtMs: number;
   endedAtMs: number;
   updatedAtMs: number;
@@ -43,6 +45,7 @@ export interface SubtitleSegment {
   translationLatencyMs: number;
   totalLatencyMs: number;
   contextSize: number;
+  revised: boolean;
 }
 
 export interface TranslationClient {
