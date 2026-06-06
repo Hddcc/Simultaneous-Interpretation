@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   createCapturedMicrophoneChunk,
   createCapturedSystemAudioChunk,
+  createEmptyPayloadMetadata,
+  createPcm16PayloadFromTimeDomainSamples,
   createSimulatedChunk,
   formatTimestamp
 } from "./audio/simulator";
@@ -18,6 +20,7 @@ import { createTranslationClient } from "./translation/client";
 import type { SubtitleSegment, TranslationEvent, TranslationContextItem } from "./translation/types";
 import type { TtsQueueItem, TtsSessionState } from "./tts/types";
 import type {
+  AudioChunkQueueState,
   AudioSessionState,
   AudioSourceOption,
   AudioSourceType,
@@ -45,6 +48,16 @@ const sourceOptions: AudioSourceOption[] = [
   }
 ];
 
+const AUDIO_PAYLOAD_QUEUE_MAX_DEPTH = 12;
+
+const initialQueueState: AudioChunkQueueState = {
+  maxDepth: AUDIO_PAYLOAD_QUEUE_MAX_DEPTH,
+  depth: 0,
+  dropped: 0,
+  lastSequence: null,
+  lastPayloadBytes: 0
+};
+
 const initialSession: AudioSessionState = {
   sourceType: "system",
   status: "idle",
@@ -52,6 +65,7 @@ const initialSession: AudioSessionState = {
   lastChunk: null,
   chunksProduced: 0,
   volume: 0,
+  queue: initialQueueState,
   error: null
 };
 
@@ -142,10 +156,7 @@ function getNativeAudioCapabilityLabel(capability: NativeSystemAudioCapability |
   return "Helper 未安装";
 }
 
-function getVolumeFromAnalyser(analyser: AnalyserNode): number {
-  const samples = new Uint8Array(analyser.fftSize);
-  analyser.getByteTimeDomainData(samples);
-
+function getVolumeFromSamples(samples: Uint8Array): number {
   let sum = 0;
   for (const sample of samples) {
     const centered = (sample - 128) / 128;
@@ -153,6 +164,16 @@ function getVolumeFromAnalyser(analyser: AnalyserNode): number {
   }
 
   return Math.min(1, Math.sqrt(sum / samples.length) * 3);
+}
+
+function getAnalyserSnapshot(analyser: AnalyserNode): { samples: Uint8Array; volume: number } {
+  const samples = new Uint8Array(analyser.fftSize);
+  analyser.getByteTimeDomainData(samples);
+
+  return {
+    samples,
+    volume: getVolumeFromSamples(samples)
+  };
 }
 
 function supportsSpeechSynthesis(): boolean {
@@ -237,6 +258,7 @@ export function App() {
     useState<NativeSystemAudioCapability | null>(null);
 
   const chunkSequenceRef = useRef(0);
+  const payloadQueueRef = useRef<NormalizedAudioChunk[]>([]);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const captureTimerRef = useRef<number | null>(null);
@@ -401,12 +423,40 @@ export function App() {
     playTtsItem(nextItem);
   }, [ttsSession]);
 
+  function updatePayloadQueue(
+    chunk: NormalizedAudioChunk,
+    currentQueue: AudioChunkQueueState
+  ): AudioChunkQueueState {
+    if (!chunk.payloadMetadata.available) {
+      payloadQueueRef.current = [];
+      return {
+        ...initialQueueState,
+        dropped: currentQueue.dropped,
+        lastSequence: chunk.sequence,
+        lastPayloadBytes: 0
+      };
+    }
+
+    const pendingChunks = [...payloadQueueRef.current, chunk];
+    const overflow = Math.max(0, pendingChunks.length - AUDIO_PAYLOAD_QUEUE_MAX_DEPTH);
+    payloadQueueRef.current = pendingChunks.slice(-AUDIO_PAYLOAD_QUEUE_MAX_DEPTH);
+
+    return {
+      maxDepth: AUDIO_PAYLOAD_QUEUE_MAX_DEPTH,
+      depth: payloadQueueRef.current.length,
+      dropped: currentQueue.dropped + overflow,
+      lastSequence: chunk.sequence,
+      lastPayloadBytes: chunk.payloadMetadata.byteLength
+    };
+  }
+
   function recordChunk(chunk: NormalizedAudioChunk): void {
     setSession((current) => ({
       ...current,
       lastChunk: chunk,
       chunksProduced: current.chunksProduced + 1,
       volume: chunk.volume,
+      queue: updatePayloadQueue(chunk, current.queue),
       error: null
     }));
     setRecentChunks((current) => [chunk, ...current].slice(0, 5));
@@ -581,7 +631,8 @@ export function App() {
             channels: 1,
             volume: 0.72,
             status: "captured",
-            fileName: current.selectedFile?.name
+            fileName: current.selectedFile?.name,
+            payloadMetadata: createEmptyPayloadMetadata()
           },
           volume: 0.72,
           error: null
@@ -609,6 +660,7 @@ export function App() {
 
   function resetInputState(type: AudioSourceType): void {
     chunkSequenceRef.current = 0;
+    payloadQueueRef.current = [];
     setRecentChunks([]);
     resetAsrState();
     setSession((current) => ({
@@ -618,6 +670,7 @@ export function App() {
       lastChunk: null,
       chunksProduced: 0,
       volume: 0,
+      queue: initialQueueState,
       error: null
     }));
   }
@@ -630,6 +683,7 @@ export function App() {
 
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
     mediaStreamRef.current = null;
+    payloadQueueRef.current = [];
 
     void audioContextRef.current?.close();
     audioContextRef.current = null;
@@ -733,6 +787,7 @@ export function App() {
     mediaStreamRef.current = stream;
     audioContextRef.current = audioContext;
 
+    payloadQueueRef.current = [];
     setSession((current) => ({
       ...current,
       sourceType,
@@ -740,15 +795,22 @@ export function App() {
       lastChunk: null,
       chunksProduced: 0,
       volume: 0,
+      queue: initialQueueState,
       error: null
     }));
 
     captureTimerRef.current = window.setInterval(() => {
-      const volume = getVolumeFromAnalyser(analyser);
+      const snapshot = getAnalyserSnapshot(analyser);
+      const payload = createPcm16PayloadFromTimeDomainSamples(
+        snapshot.samples,
+        audioContext.sampleRate,
+        1,
+        500
+      );
       const chunk =
         sourceType === "microphone"
-          ? createCapturedMicrophoneChunk(chunkSequenceRef.current, volume, sourceLabel)
-          : createCapturedSystemAudioChunk(chunkSequenceRef.current, volume, sourceLabel);
+          ? createCapturedMicrophoneChunk(chunkSequenceRef.current, snapshot.volume, sourceLabel, payload)
+          : createCapturedSystemAudioChunk(chunkSequenceRef.current, snapshot.volume, sourceLabel, payload);
       chunkSequenceRef.current += 1;
       recordChunk(chunk);
     }, 500);
@@ -865,6 +927,7 @@ export function App() {
     }
 
     chunkSequenceRef.current = 0;
+    payloadQueueRef.current = [];
     setRecentChunks([]);
     resetAsrState();
     setSession((current) => ({
@@ -875,6 +938,7 @@ export function App() {
       lastChunk: null,
       chunksProduced: 0,
       volume: 0,
+      queue: initialQueueState,
       error: null
     }));
   }
@@ -948,12 +1012,14 @@ export function App() {
     }
 
     resetAsrState();
+    payloadQueueRef.current = [];
     setSession((current) => ({
       ...current,
       status: "streaming",
       error: null,
       chunksProduced: 0,
-      volume: 0
+      volume: 0,
+      queue: initialQueueState
     }));
 
     try {
@@ -1160,6 +1226,16 @@ export function App() {
     },
     { label: "音量", value: `${Math.round(session.volume * 100)}%` },
     { label: "系统捕获", value: getNativeAudioCapabilityLabel(nativeAudioCapability) },
+    {
+      label: "Payload",
+      value: session.lastChunk?.payloadMetadata.available
+        ? `${session.lastChunk.payloadMetadata.sampleFormat}/${session.lastChunk.payloadMetadata.byteLength} B`
+        : "metadata-only"
+    },
+    {
+      label: "队列",
+      value: `${session.queue.depth}/${session.queue.maxDepth} · 丢弃 ${session.queue.dropped}`
+    },
     { label: "修订窗口", value: `${RECENT_REVISION_WINDOW} 条` },
     { label: "悬浮窗", value: floatingCaptionVisible ? "已打开" : "未打开" },
     { label: "语音播报", value: getTtsStatusLabel(ttsSession.status) },
@@ -1438,7 +1514,11 @@ export function App() {
           {ttsSession.error ? <p className="error-message">{ttsSession.error}</p> : null}
 
           <div className="placeholder-row" aria-label="输入源状态">
-            <span>统一音频块：16 kHz / mono / 500 ms</span>
+            <span>
+              {session.lastChunk?.payloadMetadata.available
+                ? `Payload：${session.lastChunk.payloadMetadata.sampleFormat} · ${session.lastChunk.payloadMetadata.frameCount} frames`
+                : "统一音频块：16 kHz / mono / 500 ms"}
+            </span>
             <span>
               {session.sourceType === "system"
                 ? selectedDesktopSourceName
@@ -1452,7 +1532,9 @@ export function App() {
             </span>
             <span>
               {session.lastChunk
-                ? `最近时间戳 ${formatTimestamp(session.lastChunk.timestampMs)}`
+                ? `最近时间戳 ${formatTimestamp(session.lastChunk.timestampMs)} · ${
+                    session.lastChunk.payloadMetadata.providerReady ? "provider-ready" : "metadata-only"
+                  }`
                 : "等待首个音频块"}
             </span>
           </div>

@@ -8,11 +8,11 @@
 
 ## 2. PR 2 - Real Audio Payload Chunk Contract
 
-- [ ] 2.1 Extend the normalized audio chunk model with provider-ready payload metadata, encoding, sample format, queue status, and payload availability.
-- [ ] 2.2 Convert microphone capture into real short audio payload chunks suitable for realtime ASR streaming.
-- [ ] 2.3 Convert the selected system playback capture path into the same payload chunk contract.
-- [ ] 2.4 Add bounded chunk queue state, dropped-chunk accounting, and volume/latency metadata.
-- [ ] 2.5 Prepare a PR description focused only on the real audio payload contract.
+- [x] 2.1 Extend the normalized audio chunk model with provider-ready payload metadata, encoding, sample format, queue status, and payload availability.
+- [x] 2.2 Convert microphone capture into real short audio payload chunks suitable for realtime ASR streaming.
+- [x] 2.3 Convert the selected system playback capture path into the same payload chunk contract.
+- [x] 2.4 Add bounded chunk queue state, dropped-chunk accounting, and volume/latency metadata.
+- [x] 2.5 Prepare a PR description focused only on the real audio payload contract.
 
 ## 3. PR 3 - Realtime Provider Configuration and Session Shell
 

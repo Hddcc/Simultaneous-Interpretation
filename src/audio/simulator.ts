@@ -1,8 +1,75 @@
-import type { AudioSourceType, LocalMediaFile, NormalizedAudioChunk } from "./types";
+import type { AudioPayload, AudioPayloadMetadata, AudioSourceType, LocalMediaFile, NormalizedAudioChunk } from "./types";
 
 export const SIMULATED_CHUNK_DURATION_MS = 500;
 export const SIMULATED_SAMPLE_RATE = 16000;
 export const SIMULATED_CHANNELS = 1;
+
+const emptyPayloadMetadata: AudioPayloadMetadata = {
+  available: false,
+  providerReady: false,
+  encoding: "none",
+  sampleFormat: "u8-time-domain",
+  byteLength: 0,
+  frameCount: 0,
+  producedAtMs: 0
+};
+
+export function createEmptyPayloadMetadata(): AudioPayloadMetadata {
+  return {
+    ...emptyPayloadMetadata,
+    producedAtMs: Date.now()
+  };
+}
+
+function encodeBytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  bytes.forEach((byte) => {
+    binary += String.fromCharCode(byte);
+  });
+  return btoa(binary);
+}
+
+export function createPcm16PayloadFromTimeDomainSamples(
+  samples: Uint8Array,
+  sampleRate = SIMULATED_SAMPLE_RATE,
+  channels = SIMULATED_CHANNELS,
+  durationMs = SIMULATED_CHUNK_DURATION_MS
+): AudioPayload {
+  const pcmBytes = new Uint8Array(samples.length * 2);
+  const view = new DataView(pcmBytes.buffer);
+
+  samples.forEach((sample, index) => {
+    const centered = Math.max(-1, Math.min(1, (sample - 128) / 128));
+    view.setInt16(index * 2, Math.round(centered * 32767), true);
+  });
+
+  return {
+    encoding: "pcm16-base64",
+    sampleFormat: "s16le",
+    sampleRate,
+    channels,
+    frameCount: samples.length,
+    byteLength: pcmBytes.byteLength,
+    durationMs,
+    data: encodeBytesToBase64(pcmBytes)
+  };
+}
+
+function createPayloadMetadata(payload?: AudioPayload): AudioPayloadMetadata {
+  if (!payload) {
+    return createEmptyPayloadMetadata();
+  }
+
+  return {
+    available: true,
+    providerReady: payload.encoding === "pcm16-base64",
+    encoding: payload.encoding,
+    sampleFormat: payload.sampleFormat,
+    byteLength: payload.byteLength,
+    frameCount: payload.frameCount,
+    producedAtMs: Date.now()
+  };
+}
 
 export function createSimulatedChunk(
   sourceType: AudioSourceType,
@@ -22,14 +89,16 @@ export function createSimulatedChunk(
     channels: SIMULATED_CHANNELS,
     volume,
     status: "simulated",
-    fileName: file?.name
+    fileName: file?.name,
+    payloadMetadata: createPayloadMetadata()
   };
 }
 
 export function createCapturedMicrophoneChunk(
   sequence: number,
   volume: number,
-  deviceLabel: string
+  deviceLabel: string,
+  payload?: AudioPayload
 ): NormalizedAudioChunk {
   const timestampMs = sequence * SIMULATED_CHUNK_DURATION_MS;
 
@@ -43,14 +112,17 @@ export function createCapturedMicrophoneChunk(
     channels: SIMULATED_CHANNELS,
     volume,
     status: "captured",
-    deviceLabel
+    deviceLabel,
+    payload,
+    payloadMetadata: createPayloadMetadata(payload)
   };
 }
 
 export function createCapturedSystemAudioChunk(
   sequence: number,
   volume: number,
-  sourceName: string
+  sourceName: string,
+  payload?: AudioPayload
 ): NormalizedAudioChunk {
   const timestampMs = sequence * SIMULATED_CHUNK_DURATION_MS;
 
@@ -64,7 +136,9 @@ export function createCapturedSystemAudioChunk(
     channels: SIMULATED_CHANNELS,
     volume,
     status: "captured",
-    deviceLabel: sourceName
+    deviceLabel: sourceName,
+    payload,
+    payloadMetadata: createPayloadMetadata(payload)
   };
 }
 
