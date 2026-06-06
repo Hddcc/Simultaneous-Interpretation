@@ -46,8 +46,16 @@ declare global {
     provider: "mock" | "openai" | "custom";
     asrMode: "mock" | "provider";
     asrModel: string;
+    asrBaseUrl: string;
+    translationProvider: "mock" | "openai" | "deepseek" | "custom";
     translationModel: string;
+    translationBaseUrl: string;
     hasOpenAiKey: boolean;
+    hasDeepSeekKey: boolean;
+    realtimeEnabled: boolean;
+    canStartRealtime: boolean;
+    missingProviderConfig: string[];
+    secretsInRenderer: false;
   }
 
   interface TranslateTextRequest {
@@ -95,6 +103,66 @@ declare global {
     nextStep: string;
   }
 
+  type ProviderConnectionState =
+    | "idle"
+    | "ready"
+    | "missing-config"
+    | "connecting"
+    | "streaming"
+    | "degraded"
+    | "closing"
+    | "closed"
+    | "error";
+
+  interface RealtimeProviderQueueSnapshot {
+    depth: number;
+    maxDepth: number;
+    dropped: number;
+    lastSequence: number | null;
+    lastPayloadBytes: number;
+  }
+
+  interface ProviderRuntimeConfig {
+    asrProvider: "mock" | "openai" | "custom";
+    asrModel: string;
+    asrBaseUrl: string;
+    translationProvider: "mock" | "openai" | "deepseek" | "custom";
+    translationModel: string;
+    translationBaseUrl: string;
+    hasOpenAiKey: boolean;
+    hasDeepSeekKey: boolean;
+    realtimeEnabled: boolean;
+    canStartRealtime: boolean;
+    missing: string[];
+    secretsInRenderer: false;
+    loadedAtMs: number;
+  }
+
+  interface RealtimeProviderSessionState {
+    state: ProviderConnectionState;
+    sessionId: string | null;
+    sourceType: "system" | "microphone" | null;
+    languagePairId: string | null;
+    asrProvider: "mock" | "openai" | "custom";
+    translationProvider: "mock" | "openai" | "deepseek" | "custom";
+    queue: RealtimeProviderQueueSnapshot;
+    recentLatencyMs: number | null;
+    error: string | null;
+    startedAtMs: number | null;
+    updatedAtMs: number;
+  }
+
+  interface ProviderHealth {
+    config: ProviderRuntimeConfig;
+    session: RealtimeProviderSessionState;
+  }
+
+  interface StartRealtimeProviderSessionRequest {
+    sourceType: "system" | "microphone";
+    languagePairId: string;
+    queue: RealtimeProviderQueueSnapshot;
+  }
+
   interface Window {
     simultaneousInterpretation?: {
       appName: string;
@@ -110,6 +178,14 @@ declare global {
         options: FloatingCaptionOptions
       ) => Promise<FloatingCaptionWindowResult>;
       getAiRuntimeConfig: () => Promise<AiRuntimeConfig>;
+      getProviderHealth: () => Promise<ProviderHealth>;
+      startRealtimeProviderSession: (
+        request: StartRealtimeProviderSessionRequest
+      ) => Promise<ProviderHealth>;
+      updateRealtimeProviderQueueState: (
+        queue: RealtimeProviderQueueSnapshot
+      ) => Promise<ProviderHealth>;
+      stopRealtimeProviderSession: () => Promise<ProviderHealth>;
       translateText: (request: TranslateTextRequest) => Promise<TranslateTextResponse>;
       transcribeLocalMediaFile: (
         request: TranscribeLocalMediaFileRequest

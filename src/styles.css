@@ -305,7 +305,8 @@ button {
   grid-column: 2 / 4;
 }
 
-.capture-capability {
+.capture-capability,
+.provider-health {
   display: grid;
   gap: 7px;
   border: 1px solid rgba(148, 163, 184, 0.2);
@@ -315,14 +316,16 @@ button {
   background: rgba(15, 23, 42, 0.58);
 }
 
-.capture-capability div {
+.capture-capability div,
+.provider-health div {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   align-items: center;
 }
 
-.capture-capability span {
+.capture-capability span,
+.provider-health span {
   border-radius: 999px;
   padding: 4px 9px;
   color: #ccfbf1;
@@ -332,17 +335,27 @@ button {
 }
 
 .capture-helper-missing span,
-.capture-unsupported-platform span {
+.capture-unsupported-platform span,
+.provider-missing-config span,
+.provider-degraded span,
+.provider-error span {
   color: #fed7aa;
   background: rgba(249, 115, 22, 0.14);
 }
 
-.capture-capability strong {
+.provider-error span {
+  color: #fecaca;
+  background: rgba(239, 68, 68, 0.14);
+}
+
+.capture-capability strong,
+.provider-health strong {
   color: #f8fafc;
   font-size: 13px;
 }
 
-.capture-capability p {
+.capture-capability p,
+.provider-health p {
   margin: 0;
   color: #94a3b8;
   font-size: 12px;
@@ -505,7 +518,7 @@ button {
 
 .status-strip {
   display: grid;
-  grid-template-columns: repeat(14, minmax(0, 1fr));
+  grid-template-columns: repeat(16, minmax(0, 1fr));
   gap: 1px;
   overflow: hidden;
   padding: 0;
