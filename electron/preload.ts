@@ -56,11 +56,29 @@ interface TranscribeLocalMediaFileResponse {
   latencyMs: number;
 }
 
+interface NativeSystemAudioCapability {
+  platform: string;
+  strategy: "windows-wasapi-loopback-helper";
+  helperName: string;
+  helperPath: string;
+  available: boolean;
+  status: "available" | "unsupported-platform" | "helper-missing";
+  sampleRate: number;
+  channels: number;
+  chunkDurationMs: number;
+  fallback: "electron-desktop-capture";
+  checkedAtMs: number;
+  notes: string[];
+  nextStep: string;
+}
+
 contextBridge.exposeInMainWorld("simultaneousInterpretation", {
   appName: "声桥 LinguaBridge",
   version: "0.1.0",
   selectLocalMediaFile: () => ipcRenderer.invoke("dialog:select-local-media-file"),
   listDesktopAudioSources: () => ipcRenderer.invoke("desktop:list-audio-sources"),
+  getSystemAudioCaptureCapability: () =>
+    ipcRenderer.invoke("native-audio:get-system-capture-capability"),
   openFloatingCaption: (options: FloatingCaptionOptions) =>
     ipcRenderer.invoke("floating-caption:open", options),
   closeFloatingCaption: () => ipcRenderer.invoke("floating-caption:close"),
