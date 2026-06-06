@@ -156,6 +156,66 @@ function getNativeAudioCapabilityLabel(capability: NativeSystemAudioCapability |
   return "Helper 未安装";
 }
 
+function getProviderConnectionLabel(state: ProviderConnectionState | undefined): string {
+  if (state === "ready") {
+    return "就绪";
+  }
+
+  if (state === "missing-config") {
+    return "缺少配置";
+  }
+
+  if (state === "connecting") {
+    return "连接中";
+  }
+
+  if (state === "streaming") {
+    return "流式会话";
+  }
+
+  if (state === "degraded") {
+    return "队列拥塞";
+  }
+
+  if (state === "closing") {
+    return "关闭中";
+  }
+
+  if (state === "closed") {
+    return "已关闭";
+  }
+
+  if (state === "error") {
+    return "异常";
+  }
+
+  return "本地模拟";
+}
+
+function getProviderModeLabel(providerHealth: ProviderHealth | null): string {
+  if (!providerHealth) {
+    return "检测中";
+  }
+
+  return `${providerHealth.config.asrProvider} ASR · ${providerHealth.config.translationProvider} 翻译`;
+}
+
+function getProviderKeyLabel(providerHealth: ProviderHealth | null): string {
+  if (!providerHealth) {
+    return "检测中";
+  }
+
+  if (providerHealth.config.missing.length > 0) {
+    return `缺少 ${providerHealth.config.missing.join(", ")}`;
+  }
+
+  if (!providerHealth.config.realtimeEnabled) {
+    return "模拟模式";
+  }
+
+  return "本地配置可用";
+}
+
 function getVolumeFromSamples(samples: Uint8Array): number {
   let sum = 0;
   for (const sample of samples) {
@@ -254,15 +314,18 @@ export function App() {
     useState<FloatingCaptionPosition>("bottom-right");
   const [ttsSession, setTtsSession] = useState<TtsSessionState>(initialTtsSession);
   const [aiRuntimeConfig, setAiRuntimeConfig] = useState<AiRuntimeConfig | null>(null);
+  const [providerHealth, setProviderHealth] = useState<ProviderHealth | null>(null);
   const [nativeAudioCapability, setNativeAudioCapability] =
     useState<NativeSystemAudioCapability | null>(null);
 
   const chunkSequenceRef = useRef(0);
   const payloadQueueRef = useRef<NormalizedAudioChunk[]>([]);
+  const payloadQueueStateRef = useRef<AudioChunkQueueState>(initialQueueState);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const captureTimerRef = useRef<number | null>(null);
   const languagePairRef = useRef(activeLanguagePair);
+  const providerHealthRef = useRef<ProviderHealth | null>(null);
   const asrClientRef = useRef(createStreamingAsrClient(loadAsrConfig()));
   const translationClientRef = useRef(createTranslationClient());
   const subtitleSegmentsRef = useRef<SubtitleSegment[]>([]);
@@ -347,6 +410,10 @@ export function App() {
   }, [activeLanguagePair]);
 
   useEffect(() => {
+    providerHealthRef.current = providerHealth;
+  }, [providerHealth]);
+
+  useEffect(() => {
     appInfo?.updateFloatingCaption?.(floatingCaptionState);
   }, [appInfo, floatingCaptionState]);
 
@@ -356,6 +423,10 @@ export function App() {
 
   useEffect(() => {
     void appInfo?.getAiRuntimeConfig?.().then(setAiRuntimeConfig);
+    void appInfo?.getProviderHealth?.().then((nextHealth) => {
+      providerHealthRef.current = nextHealth;
+      setProviderHealth(nextHealth);
+    });
   }, [appInfo]);
 
   useEffect(() => {
@@ -423,6 +494,78 @@ export function App() {
     playTtsItem(nextItem);
   }, [ttsSession]);
 
+  function toProviderQueueSnapshot(queue: AudioChunkQueueState): RealtimeProviderQueueSnapshot {
+    return {
+      depth: queue.depth,
+      maxDepth: queue.maxDepth,
+      dropped: queue.dropped,
+      lastSequence: queue.lastSequence,
+      lastPayloadBytes: queue.lastPayloadBytes
+    };
+  }
+
+  async function refreshProviderStatus(): Promise<ProviderHealth | null> {
+    if (!appInfo?.getProviderHealth) {
+      return null;
+    }
+
+    const nextHealth = await appInfo.getProviderHealth();
+    providerHealthRef.current = nextHealth;
+    setProviderHealth(nextHealth);
+    return nextHealth;
+  }
+
+  function shouldUseRealtimeProviderShell(health = providerHealth): boolean {
+    return Boolean(health?.config.realtimeEnabled);
+  }
+
+  async function startRealtimeProviderShell(sourceType: "system" | "microphone"): Promise<void> {
+    const currentHealth = providerHealthRef.current ?? providerHealth ?? (await refreshProviderStatus());
+
+    if (!appInfo?.startRealtimeProviderSession || !shouldUseRealtimeProviderShell(currentHealth)) {
+      return;
+    }
+
+    const nextHealth = await appInfo.startRealtimeProviderSession({
+      sourceType,
+      languagePairId: activeLanguagePair.id,
+      queue: toProviderQueueSnapshot(initialQueueState)
+    });
+    providerHealthRef.current = nextHealth;
+    setProviderHealth(nextHealth);
+
+    if (nextHealth.session.state === "missing-config" || nextHealth.session.state === "error") {
+      throw new Error(nextHealth.session.error || "实时服务配置不可用。");
+    }
+  }
+
+  async function stopRealtimeProviderShell(): Promise<void> {
+    if (!appInfo?.stopRealtimeProviderSession || !providerHealth?.config.realtimeEnabled) {
+      return;
+    }
+
+    const nextHealth = await appInfo.stopRealtimeProviderSession();
+    providerHealthRef.current = nextHealth;
+    setProviderHealth(nextHealth);
+  }
+
+  function syncProviderQueue(queue: AudioChunkQueueState): void {
+    const currentProviderHealth = providerHealthRef.current ?? providerHealth;
+
+    if (
+      !appInfo?.updateRealtimeProviderQueueState ||
+      !currentProviderHealth?.config.realtimeEnabled ||
+      !currentProviderHealth.session.sessionId
+    ) {
+      return;
+    }
+
+    void appInfo.updateRealtimeProviderQueueState(toProviderQueueSnapshot(queue)).then((nextHealth) => {
+      providerHealthRef.current = nextHealth;
+      setProviderHealth(nextHealth);
+    });
+  }
+
   function updatePayloadQueue(
     chunk: NormalizedAudioChunk,
     currentQueue: AudioChunkQueueState
@@ -451,14 +594,17 @@ export function App() {
   }
 
   function recordChunk(chunk: NormalizedAudioChunk): void {
+    const nextQueue = updatePayloadQueue(chunk, payloadQueueStateRef.current);
+    payloadQueueStateRef.current = nextQueue;
     setSession((current) => ({
       ...current,
       lastChunk: chunk,
       chunksProduced: current.chunksProduced + 1,
       volume: chunk.volume,
-      queue: updatePayloadQueue(chunk, current.queue),
+      queue: nextQueue,
       error: null
     }));
+    syncProviderQueue(nextQueue);
     setRecentChunks((current) => [chunk, ...current].slice(0, 5));
     publishAsrEvents(chunk);
   }
@@ -661,6 +807,7 @@ export function App() {
   function resetInputState(type: AudioSourceType): void {
     chunkSequenceRef.current = 0;
     payloadQueueRef.current = [];
+    payloadQueueStateRef.current = initialQueueState;
     setRecentChunks([]);
     resetAsrState();
     setSession((current) => ({
@@ -684,6 +831,7 @@ export function App() {
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
     mediaStreamRef.current = null;
     payloadQueueRef.current = [];
+    payloadQueueStateRef.current = initialQueueState;
 
     void audioContextRef.current?.close();
     audioContextRef.current = null;
@@ -691,6 +839,7 @@ export function App() {
 
   function updateSourceType(type: AudioSourceType): void {
     cleanupActiveCapture();
+    void stopRealtimeProviderShell();
     resetInputState(type);
 
     if (type === "microphone" && microphoneDevices.length === 0) {
@@ -788,6 +937,7 @@ export function App() {
     audioContextRef.current = audioContext;
 
     payloadQueueRef.current = [];
+    payloadQueueStateRef.current = initialQueueState;
     setSession((current) => ({
       ...current,
       sourceType,
@@ -831,6 +981,7 @@ export function App() {
       chunkSequenceRef.current = 0;
       setRecentChunks([]);
       resetAsrState();
+      await startRealtimeProviderShell("microphone");
 
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: selectedMicrophoneId
@@ -850,6 +1001,7 @@ export function App() {
       startAnalyserCapture(stream, "microphone", selectedMicrophoneLabel);
     } catch (error) {
       cleanupActiveCapture();
+      void stopRealtimeProviderShell();
       setSession((current) => ({
         ...current,
         sourceType: "microphone",
@@ -877,6 +1029,7 @@ export function App() {
       chunkSequenceRef.current = 0;
       setRecentChunks([]);
       resetAsrState();
+      await startRealtimeProviderShell("system");
 
       const desktopConstraints = createDesktopConstraints(sourceId);
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -895,6 +1048,7 @@ export function App() {
       startAnalyserCapture(stream, "system", selectedDesktopSourceName);
     } catch (error) {
       cleanupActiveCapture();
+      void stopRealtimeProviderShell();
       setSession((current) => ({
         ...current,
         sourceType: "system",
@@ -928,6 +1082,7 @@ export function App() {
 
     chunkSequenceRef.current = 0;
     payloadQueueRef.current = [];
+    payloadQueueStateRef.current = initialQueueState;
     setRecentChunks([]);
     resetAsrState();
     setSession((current) => ({
@@ -946,8 +1101,8 @@ export function App() {
   async function startSession(): Promise<void> {
     if (
       session.sourceType === "file" &&
-      asrConfig.provider === "openai" &&
-      asrConfig.mode === "provider"
+      aiRuntimeConfig?.provider === "openai" &&
+      aiRuntimeConfig.asrMode === "provider"
     ) {
       await startProviderFileTranscription();
       return;
@@ -1013,6 +1168,7 @@ export function App() {
 
     resetAsrState();
     payloadQueueRef.current = [];
+    payloadQueueStateRef.current = initialQueueState;
     setSession((current) => ({
       ...current,
       status: "streaming",
@@ -1026,7 +1182,7 @@ export function App() {
       const response = await appInfo.transcribeLocalMediaFile({
         filePath: session.selectedFile.path,
         languageCode: activeLanguagePair.source.code,
-        model: asrConfig.model
+        model: aiRuntimeConfig?.asrModel ?? asrConfig.model
       });
       publishProviderTranscript(response.text, response.latencyMs);
     } catch (error) {
@@ -1042,6 +1198,7 @@ export function App() {
   function pauseSession(): void {
     if (session.sourceType === "microphone" || session.sourceType === "system") {
       cleanupActiveCapture();
+      void stopRealtimeProviderShell();
     }
 
     setSession((current) => ({
@@ -1206,15 +1363,11 @@ export function App() {
     { label: "音频源", value: getSourceLabel(session.sourceType) },
     { label: "输入状态", value: session.status },
     { label: "音频块", value: String(session.chunksProduced) },
-    { label: "ASR", value: `${asrConfig.provider}/${asrConfig.model}` },
+    { label: "ASR", value: providerHealth?.config.asrModel ?? `${asrConfig.provider}/${asrConfig.model}` },
+    { label: "Provider", value: getProviderModeLabel(providerHealth) },
     {
       label: "API Key",
-      value:
-        aiRuntimeConfig?.provider === "openai"
-          ? aiRuntimeConfig.hasOpenAiKey
-            ? "已配置"
-            : "未配置"
-          : "模拟"
+      value: getProviderKeyLabel(providerHealth)
     },
     {
       label: "字幕延迟",
@@ -1235,6 +1388,10 @@ export function App() {
     {
       label: "队列",
       value: `${session.queue.depth}/${session.queue.maxDepth} · 丢弃 ${session.queue.dropped}`
+    },
+    {
+      label: "服务状态",
+      value: getProviderConnectionLabel(providerHealth?.session.state)
     },
     { label: "修订窗口", value: `${RECENT_REVISION_WINDOW} 条` },
     { label: "悬浮窗", value: floatingCaptionVisible ? "已打开" : "未打开" },
@@ -1443,6 +1600,26 @@ export function App() {
                 {nativeAudioCapability.chunkDurationMs} ms
               </p>
               <p>{nativeAudioCapability.nextStep}</p>
+            </div>
+          ) : null}
+
+          {providerHealth ? (
+            <div
+              className={`provider-health provider-${providerHealth.session.state}`}
+              aria-label="实时服务状态"
+            >
+              <div>
+                <span>{getProviderConnectionLabel(providerHealth.session.state)}</span>
+                <strong>{getProviderModeLabel(providerHealth)}</strong>
+              </div>
+              <p>
+                ASR: {providerHealth.config.asrModel} · 翻译: {providerHealth.config.translationModel}
+              </p>
+              <p>
+                队列: {providerHealth.session.queue.depth}/{providerHealth.session.queue.maxDepth} ·
+                丢弃 {providerHealth.session.queue.dropped}
+              </p>
+              <p>{providerHealth.session.error ?? getProviderKeyLabel(providerHealth)}</p>
             </div>
           ) : null}
 

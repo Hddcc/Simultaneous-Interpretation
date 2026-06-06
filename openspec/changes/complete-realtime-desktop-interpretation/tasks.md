@@ -16,11 +16,11 @@
 
 ## 3. PR 3 - Realtime Provider Configuration and Session Shell
 
-- [ ] 3.1 Add `.env.example` entries for realtime ASR provider, translation provider, model names, base URLs, and optional DeepSeek translation configuration.
-- [ ] 3.2 Move provider secrets and realtime session creation into Electron main process or another local-only runtime boundary.
-- [ ] 3.3 Add IPC/preload APIs for provider health, session start, session stop, and provider configuration status.
-- [ ] 3.4 Add workbench status indicators for provider mode, API key presence, connection state, queue depth, and recoverable errors.
-- [ ] 3.5 Prepare a PR description focused only on provider configuration and session lifecycle shell.
+- [x] 3.1 Add `.env.example` entries for realtime ASR provider, translation provider, model names, base URLs, and optional DeepSeek translation configuration.
+- [x] 3.2 Move provider secrets and realtime session creation into Electron main process or another local-only runtime boundary.
+- [x] 3.3 Add IPC/preload APIs for provider health, session start, session stop, and provider configuration status.
+- [x] 3.4 Add workbench status indicators for provider mode, API key presence, connection state, queue depth, and recoverable errors.
+- [x] 3.5 Prepare a PR description focused only on provider configuration and session lifecycle shell.
 
 ## 4. PR 4 - Realtime ASR Streaming
 

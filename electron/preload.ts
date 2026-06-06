@@ -23,8 +23,16 @@ interface AiRuntimeConfig {
   provider: "mock" | "openai" | "custom";
   asrMode: "mock" | "provider";
   asrModel: string;
+  asrBaseUrl: string;
+  translationProvider: "mock" | "openai" | "deepseek" | "custom";
   translationModel: string;
+  translationBaseUrl: string;
   hasOpenAiKey: boolean;
+  hasDeepSeekKey: boolean;
+  realtimeEnabled: boolean;
+  canStartRealtime: boolean;
+  missingProviderConfig: string[];
+  secretsInRenderer: false;
 }
 
 interface TranslateTextRequest {
@@ -72,6 +80,66 @@ interface NativeSystemAudioCapability {
   nextStep: string;
 }
 
+type ProviderConnectionState =
+  | "idle"
+  | "ready"
+  | "missing-config"
+  | "connecting"
+  | "streaming"
+  | "degraded"
+  | "closing"
+  | "closed"
+  | "error";
+
+interface RealtimeProviderQueueSnapshot {
+  depth: number;
+  maxDepth: number;
+  dropped: number;
+  lastSequence: number | null;
+  lastPayloadBytes: number;
+}
+
+interface ProviderRuntimeConfig {
+  asrProvider: "mock" | "openai" | "custom";
+  asrModel: string;
+  asrBaseUrl: string;
+  translationProvider: "mock" | "openai" | "deepseek" | "custom";
+  translationModel: string;
+  translationBaseUrl: string;
+  hasOpenAiKey: boolean;
+  hasDeepSeekKey: boolean;
+  realtimeEnabled: boolean;
+  canStartRealtime: boolean;
+  missing: string[];
+  secretsInRenderer: false;
+  loadedAtMs: number;
+}
+
+interface RealtimeProviderSessionState {
+  state: ProviderConnectionState;
+  sessionId: string | null;
+  sourceType: "system" | "microphone" | null;
+  languagePairId: string | null;
+  asrProvider: "mock" | "openai" | "custom";
+  translationProvider: "mock" | "openai" | "deepseek" | "custom";
+  queue: RealtimeProviderQueueSnapshot;
+  recentLatencyMs: number | null;
+  error: string | null;
+  startedAtMs: number | null;
+  updatedAtMs: number;
+}
+
+interface ProviderHealth {
+  config: ProviderRuntimeConfig;
+  session: RealtimeProviderSessionState;
+}
+
+interface StartRealtimeProviderSessionRequest {
+  sourceType: "system" | "microphone";
+  languagePairId: string;
+  queue: RealtimeProviderQueueSnapshot;
+}
+
 contextBridge.exposeInMainWorld("simultaneousInterpretation", {
   appName: "声桥 LinguaBridge",
   version: "0.1.0",
@@ -85,6 +153,12 @@ contextBridge.exposeInMainWorld("simultaneousInterpretation", {
   configureFloatingCaption: (options: FloatingCaptionOptions) =>
     ipcRenderer.invoke("floating-caption:configure", options),
   getAiRuntimeConfig: () => ipcRenderer.invoke("ai:get-runtime-config"),
+  getProviderHealth: () => ipcRenderer.invoke("provider:get-health"),
+  startRealtimeProviderSession: (request: StartRealtimeProviderSessionRequest) =>
+    ipcRenderer.invoke("provider:start-realtime-session", request),
+  updateRealtimeProviderQueueState: (queue: RealtimeProviderQueueSnapshot) =>
+    ipcRenderer.invoke("provider:update-queue-state", queue),
+  stopRealtimeProviderSession: () => ipcRenderer.invoke("provider:stop-realtime-session"),
   translateText: (request: TranslateTextRequest) => ipcRenderer.invoke("ai:translate-text", request),
   transcribeLocalMediaFile: (request: TranscribeLocalMediaFileRequest) =>
     ipcRenderer.invoke("ai:transcribe-local-media-file", request),

@@ -2,6 +2,15 @@ import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, screen, session }
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { detectNativeSystemAudioCapability } from "./nativeAudioCapability";
+import {
+  getProviderHealth,
+  getProviderRuntimeConfig,
+  startRealtimeProviderSession,
+  stopRealtimeProviderSession,
+  updateRealtimeProviderQueueState,
+  type RealtimeProviderQueueSnapshot,
+  type StartRealtimeProviderSessionRequest
+} from "./providerSession";
 
 const isDev = process.argv.includes("--dev");
 let floatingCaptionWindow: BrowserWindow | null = null;
@@ -30,8 +39,16 @@ interface AiRuntimeConfig {
   provider: "mock" | "openai" | "custom";
   asrMode: "mock" | "provider";
   asrModel: string;
+  asrBaseUrl: string;
+  translationProvider: "mock" | "openai" | "deepseek" | "custom";
   translationModel: string;
+  translationBaseUrl: string;
   hasOpenAiKey: boolean;
+  hasDeepSeekKey: boolean;
+  realtimeEnabled: boolean;
+  canStartRealtime: boolean;
+  missingProviderConfig: string[];
+  secretsInRenderer: false;
 }
 
 interface TranslateTextRequest {
@@ -120,16 +137,29 @@ async function loadLocalEnv(): Promise<void> {
 }
 
 function getAiRuntimeConfig(): AiRuntimeConfig {
-  const provider = process.env.VITE_AI_PROVIDER === "openai" ? "openai" : "mock";
-  const asrMode = provider === "openai" && process.env.VITE_ASR_MODE === "provider" ? "provider" : "mock";
+  const providerRuntimeConfig = getProviderRuntimeConfig();
+  const provider =
+    providerRuntimeConfig.asrProvider === "openai"
+      ? "openai"
+      : providerRuntimeConfig.asrProvider === "custom"
+        ? "custom"
+        : "mock";
+  const asrMode = provider !== "mock" ? "provider" : "mock";
 
   return {
     provider,
     asrMode,
-    asrModel: process.env.VITE_ASR_MODEL || (provider === "openai" ? "gpt-4o-mini-transcribe" : "mock-streaming-asr"),
-    translationModel:
-      process.env.VITE_TRANSLATION_MODEL || (provider === "openai" ? "gpt-4.1-mini" : "mock-bilingual-translator"),
-    hasOpenAiKey: Boolean(process.env.OPENAI_API_KEY)
+    asrModel: providerRuntimeConfig.asrModel,
+    asrBaseUrl: providerRuntimeConfig.asrBaseUrl,
+    translationProvider: providerRuntimeConfig.translationProvider,
+    translationModel: providerRuntimeConfig.translationModel,
+    translationBaseUrl: providerRuntimeConfig.translationBaseUrl,
+    hasOpenAiKey: providerRuntimeConfig.hasOpenAiKey,
+    hasDeepSeekKey: providerRuntimeConfig.hasDeepSeekKey,
+    realtimeEnabled: providerRuntimeConfig.realtimeEnabled,
+    canStartRealtime: providerRuntimeConfig.canStartRealtime,
+    missingProviderConfig: providerRuntimeConfig.missing,
+    secretsInRenderer: false
   };
 }
 
@@ -463,6 +493,20 @@ ipcMain.on("floating-caption:update", (_event, state: FloatingCaptionState) => {
 });
 
 ipcMain.handle("ai:get-runtime-config", () => getAiRuntimeConfig());
+
+ipcMain.handle("provider:get-health", () => getProviderHealth());
+
+ipcMain.handle(
+  "provider:start-realtime-session",
+  (_event, request: StartRealtimeProviderSessionRequest) => startRealtimeProviderSession(request)
+);
+
+ipcMain.handle(
+  "provider:update-queue-state",
+  (_event, queue: RealtimeProviderQueueSnapshot) => updateRealtimeProviderQueueState(queue)
+);
+
+ipcMain.handle("provider:stop-realtime-session", () => stopRealtimeProviderSession());
 
 ipcMain.handle("ai:translate-text", (_event, request: TranslateTextRequest) =>
   translateWithOpenAi(request)
