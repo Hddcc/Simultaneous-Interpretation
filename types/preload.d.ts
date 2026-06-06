@@ -79,12 +79,29 @@ declare global {
     latencyMs: number;
   }
 
+  interface NativeSystemAudioCapability {
+    platform: string;
+    strategy: "windows-wasapi-loopback-helper";
+    helperName: string;
+    helperPath: string;
+    available: boolean;
+    status: "available" | "unsupported-platform" | "helper-missing";
+    sampleRate: number;
+    channels: number;
+    chunkDurationMs: number;
+    fallback: "electron-desktop-capture";
+    checkedAtMs: number;
+    notes: string[];
+    nextStep: string;
+  }
+
   interface Window {
     simultaneousInterpretation?: {
       appName: string;
       version: string;
       selectLocalMediaFile: () => Promise<LocalMediaFile | null>;
       listDesktopAudioSources: () => Promise<DesktopAudioSource[]>;
+      getSystemAudioCaptureCapability: () => Promise<NativeSystemAudioCapability>;
       openFloatingCaption: (
         options: FloatingCaptionOptions
       ) => Promise<FloatingCaptionWindowResult>;

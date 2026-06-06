@@ -126,6 +126,22 @@ function getTtsStatusLabel(status: TtsSessionState["status"]): string {
   return "已关闭";
 }
 
+function getNativeAudioCapabilityLabel(capability: NativeSystemAudioCapability | null): string {
+  if (!capability) {
+    return "检测中";
+  }
+
+  if (capability.status === "available") {
+    return "WASAPI 可用";
+  }
+
+  if (capability.status === "unsupported-platform") {
+    return "平台未支持";
+  }
+
+  return "Helper 未安装";
+}
+
 function getVolumeFromAnalyser(analyser: AnalyserNode): number {
   const samples = new Uint8Array(analyser.fftSize);
   analyser.getByteTimeDomainData(samples);
@@ -217,6 +233,8 @@ export function App() {
     useState<FloatingCaptionPosition>("bottom-right");
   const [ttsSession, setTtsSession] = useState<TtsSessionState>(initialTtsSession);
   const [aiRuntimeConfig, setAiRuntimeConfig] = useState<AiRuntimeConfig | null>(null);
+  const [nativeAudioCapability, setNativeAudioCapability] =
+    useState<NativeSystemAudioCapability | null>(null);
 
   const chunkSequenceRef = useRef(0);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -316,6 +334,10 @@ export function App() {
 
   useEffect(() => {
     void appInfo?.getAiRuntimeConfig?.().then(setAiRuntimeConfig);
+  }, [appInfo]);
+
+  useEffect(() => {
+    void appInfo?.getSystemAudioCaptureCapability?.().then(setNativeAudioCapability);
   }, [appInfo]);
 
   useEffect(() => {
@@ -1137,6 +1159,7 @@ export function App() {
           : "等待字幕"
     },
     { label: "音量", value: `${Math.round(session.volume * 100)}%` },
+    { label: "系统捕获", value: getNativeAudioCapabilityLabel(nativeAudioCapability) },
     { label: "修订窗口", value: `${RECENT_REVISION_WINDOW} 条` },
     { label: "悬浮窗", value: floatingCaptionVisible ? "已打开" : "未打开" },
     { label: "语音播报", value: getTtsStatusLabel(ttsSession.status) },
@@ -1328,6 +1351,24 @@ export function App() {
               <span style={{ width: `${Math.round(session.volume * 100)}%` }} />
             </div>
           </div>
+
+          {session.sourceType === "system" && nativeAudioCapability ? (
+            <div
+              className={`capture-capability capture-${nativeAudioCapability.status}`}
+              aria-label="系统音频捕获能力"
+            >
+              <div>
+                <span>{getNativeAudioCapabilityLabel(nativeAudioCapability)}</span>
+                <strong>{nativeAudioCapability.strategy}</strong>
+              </div>
+              <p>{nativeAudioCapability.notes[0]}</p>
+              <p>
+                fallback: {nativeAudioCapability.fallback} · {nativeAudioCapability.sampleRate} Hz ·{" "}
+                {nativeAudioCapability.chunkDurationMs} ms
+              </p>
+              <p>{nativeAudioCapability.nextStep}</p>
+            </div>
+          ) : null}
 
           <div className="floating-controls" aria-label="悬浮字幕控制">
             <button

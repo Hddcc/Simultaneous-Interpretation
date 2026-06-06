@@ -1,6 +1,7 @@
 import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, screen, session } from "electron";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
+import { detectNativeSystemAudioCapability } from "./nativeAudioCapability";
 
 const isDev = process.argv.includes("--dev");
 let floatingCaptionWindow: BrowserWindow | null = null;
@@ -426,6 +427,10 @@ ipcMain.handle("desktop:list-audio-sources", async () => {
     name: source.name
   }));
 });
+
+ipcMain.handle("native-audio:get-system-capture-capability", () =>
+  detectNativeSystemAudioCapability()
+);
 
 ipcMain.handle("floating-caption:open", (_event, options: FloatingCaptionOptions) => {
   const window = createFloatingCaptionWindow(options);

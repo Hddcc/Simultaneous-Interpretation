@@ -1,10 +1,10 @@
 ## 1. PR 1 - Live Audio Architecture and Capture Spike
 
-- [ ] 1.1 Audit the current Electron audio capture, mock ASR, file transcription, and translation flow to identify reusable integration points.
-- [ ] 1.2 Choose the first Windows system playback capture approach, documenting whether it uses WASAPI loopback helper, native addon, or a local helper executable.
-- [ ] 1.3 Add a minimal capture spike that can detect helper availability and report system playback capture capability without changing the main user flow.
-- [ ] 1.4 Verify the app still builds and the existing mock/file flows continue to run.
-- [ ] 1.5 Prepare a PR description focused only on the architecture decision and capture spike.
+- [x] 1.1 Audit the current Electron audio capture, mock ASR, file transcription, and translation flow to identify reusable integration points.
+- [x] 1.2 Choose the first Windows system playback capture approach, documenting whether it uses WASAPI loopback helper, native addon, or a local helper executable.
+- [x] 1.3 Add a minimal capture spike that can detect helper availability and report system playback capture capability without changing the main user flow.
+- [x] 1.4 Verify the app still builds and the existing mock/file flows continue to run.
+- [x] 1.5 Prepare a PR description focused only on the architecture decision and capture spike.
 
 ## 2. PR 2 - Real Audio Payload Chunk Contract
 

@@ -305,6 +305,51 @@ button {
   grid-column: 2 / 4;
 }
 
+.capture-capability {
+  display: grid;
+  gap: 7px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 8px;
+  padding: 12px 14px;
+  color: #cbd5e1;
+  background: rgba(15, 23, 42, 0.58);
+}
+
+.capture-capability div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.capture-capability span {
+  border-radius: 999px;
+  padding: 4px 9px;
+  color: #ccfbf1;
+  background: rgba(20, 184, 166, 0.14);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.capture-helper-missing span,
+.capture-unsupported-platform span {
+  color: #fed7aa;
+  background: rgba(249, 115, 22, 0.14);
+}
+
+.capture-capability strong {
+  color: #f8fafc;
+  font-size: 13px;
+}
+
+.capture-capability p {
+  margin: 0;
+  color: #94a3b8;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
 .inline-select {
   min-height: 38px;
 }
@@ -460,7 +505,7 @@ button {
 
 .status-strip {
   display: grid;
-  grid-template-columns: repeat(10, minmax(0, 1fr));
+  grid-template-columns: repeat(12, minmax(0, 1fr));
   gap: 1px;
   overflow: hidden;
   padding: 0;
