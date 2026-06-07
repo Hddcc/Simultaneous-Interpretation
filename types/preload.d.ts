@@ -71,6 +71,7 @@ declare global {
 
   interface TranslateTextResponse {
     text: string;
+    provider: "openai" | "deepseek" | "custom";
     model: string;
     latencyMs: number;
   }
