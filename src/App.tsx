@@ -16,6 +16,7 @@ import {
   savePreferredLanguagePair,
   supportedLanguagePairs
 } from "./language/pairs";
+import { createLiveExperienceState } from "./liveExperience/state";
 import {
   DEFAULT_REVISION_WINDOW,
   getSubtitleContextItems,
@@ -81,6 +82,8 @@ const defaultFloatingCaptionState: FloatingCaptionState = {
   translatedText: "等待字幕",
   sourceText: "开始输入后，这里会显示实时字幕。",
   statusLabel: "等待输入",
+  compactStatusLabel: "等待",
+  severity: "neutral",
   languageDirection: "英语 -> 中文",
   sessionStatus: "idle",
   latencyLabel: "等待字幕",
@@ -301,9 +304,13 @@ function FloatingCaptionWindow() {
   }, [appInfo]);
 
   return (
-    <main className={`floating-caption-shell ${caption.revised ? "floating-revised" : ""}`}>
+    <main
+      className={`floating-caption-shell floating-${caption.severity} ${
+        caption.revised ? "floating-revised" : ""
+      }`}
+    >
       <div className="floating-caption-top">
-        <span>{caption.statusLabel}</span>
+        <span>{caption.compactStatusLabel}</span>
         <span>{caption.languageDirection}</span>
       </div>
       <p className="floating-source">{caption.sourceText}</p>
@@ -383,6 +390,15 @@ export function App() {
   const latestSubtitleSegment = subtitleSegments[0];
   const latestTranslationEvent = translationEvents[0];
   const asrConfig = asrClientRef.current.getConfig();
+  const liveExperience = useMemo(
+    () =>
+      createLiveExperienceState({
+        session,
+        providerHealth,
+        nativeAudioCapability
+      }),
+    [nativeAudioCapability, providerHealth, session]
+  );
 
   const floatingCaptionState = useMemo<FloatingCaptionState>(
     () => ({
@@ -396,11 +412,11 @@ export function App() {
           : latestSubtitleSegment.status === "partial"
             ? "临时字幕"
             : "实时字幕"
-        : session.status === "streaming"
-          ? "识别中"
-          : "等待输入",
+        : liveExperience.label,
+      compactStatusLabel: liveExperience.compactLabel,
+      severity: liveExperience.severity,
       languageDirection: activeLanguagePair.label,
-      sessionStatus: session.status,
+      sessionStatus: liveExperience.label,
       latencyLabel: latestSubtitleSegment
         ? `${latestSubtitleSegment.totalLatencyMs} ms`
         : latestAsrEvent
@@ -414,8 +430,8 @@ export function App() {
       latestAsrEvent,
       latestAsrSegment,
       latestSubtitleSegment,
+      liveExperience,
       selectedSource.description,
-      session.status
     ]
   );
 
@@ -1314,6 +1330,47 @@ export function App() {
     }));
   }
 
+  function stopSession(): void {
+    cleanupActiveCapture();
+    void stopRealtimeProviderShell();
+    payloadQueueRef.current = [];
+    payloadQueueStateRef.current = initialQueueState;
+    setSession((current) => ({
+      ...current,
+      status: "stopped",
+      volume: 0,
+      queue: initialQueueState,
+      error: null
+    }));
+  }
+
+  function retryCurrentSource(): void {
+    cleanupActiveCapture();
+    void stopRealtimeProviderShell();
+    payloadQueueRef.current = [];
+    payloadQueueStateRef.current = initialQueueState;
+    setSession((current) => ({
+      ...current,
+      status: current.selectedFile || current.sourceType !== "file" ? "ready" : "idle",
+      volume: 0,
+      queue: initialQueueState,
+      error: null
+    }));
+    window.setTimeout(() => {
+      void startSession();
+    }, 0);
+  }
+
+  function switchToFallbackSource(): void {
+    const fallbackSource =
+      session.sourceType === "system"
+        ? "microphone"
+        : session.sourceType === "microphone"
+          ? "file"
+          : "microphone";
+    updateSourceType(fallbackSource);
+  }
+
   function setTtsEnabled(enabled: boolean): void {
     if (enabled && !supportsSpeechSynthesis()) {
       setTtsSession((current) => ({
@@ -1480,7 +1537,7 @@ export function App() {
 
   const metrics = [
     { label: "音频源", value: getSourceLabel(session.sourceType) },
-    { label: "输入状态", value: session.status },
+    { label: "输入状态", value: liveExperience.label },
     { label: "音频块", value: String(session.chunksProduced) },
     { label: "ASR", value: providerHealth?.config.asrModel ?? `${asrConfig.provider}/${asrConfig.model}` },
     { label: "翻译模型", value: translationProviderLabel },
@@ -1529,6 +1586,7 @@ export function App() {
       label: "服务状态",
       value: getProviderConnectionLabel(providerHealth?.session.state)
     },
+    { label: "恢复建议", value: liveExperience.recoveryAction },
     { label: "修订窗口", value: `${RECENT_REVISION_WINDOW} 条` },
     { label: "最近修订", value: latestRevisionLabel },
     { label: "悬浮窗", value: floatingCaptionVisible ? "已打开" : "未打开" },
@@ -1581,6 +1639,22 @@ export function App() {
           <button type="button" className="secondary-action" onClick={pauseSession}>
             暂停
           </button>
+          <button
+            type="button"
+            className="secondary-action"
+            disabled={!liveExperience.canStop}
+            onClick={stopSession}
+          >
+            停止
+          </button>
+          <button
+            type="button"
+            className="secondary-action"
+            disabled={!liveExperience.canRetry}
+            onClick={retryCurrentSource}
+          >
+            重试
+          </button>
         </form>
       </header>
 
@@ -1591,12 +1665,12 @@ export function App() {
               <p className="section-kicker">实时输入</p>
               <h2 id="live-caption-title">{selectedSource.label}</h2>
             </div>
-            <span className={`status-pill status-${session.status}`}>
-              {session.status === "streaming" ? "输入中" : "等待输入"}
+            <span className={`status-pill status-${liveExperience.phase}`}>
+              {liveExperience.label}
             </span>
           </div>
 
-          <div className="caption-stage" aria-live="polite">
+          <div className={`caption-stage caption-${liveExperience.severity}`} aria-live="polite">
             <p className="source-caption">
               {latestSubtitleSegment
                 ? latestSubtitleSegment.sourceText
@@ -1665,6 +1739,40 @@ export function App() {
               </div>
             ) : null}
             {session.error ? <p className="error-message">{session.error}</p> : null}
+            <div className={`recovery-banner recovery-${liveExperience.severity}`}>
+              <div>
+                <span>{liveExperience.compactLabel}</span>
+                <strong>{liveExperience.detail}</strong>
+              </div>
+              <p>{liveExperience.recoveryAction}</p>
+            </div>
+          </div>
+
+          <div className="recovery-actions" aria-label="恢复操作">
+            <button
+              type="button"
+              className="secondary-action"
+              disabled={!liveExperience.canRetry}
+              onClick={retryCurrentSource}
+            >
+              重试当前来源
+            </button>
+            <button
+              type="button"
+              className="secondary-action"
+              disabled={!liveExperience.canStop}
+              onClick={stopSession}
+            >
+              停止输入
+            </button>
+            <button
+              type="button"
+              className="secondary-action"
+              disabled={!liveExperience.canUseFallback}
+              onClick={switchToFallbackSource}
+            >
+              切换备用输入
+            </button>
           </div>
 
           <div className="source-actions" aria-label="音频源操作">

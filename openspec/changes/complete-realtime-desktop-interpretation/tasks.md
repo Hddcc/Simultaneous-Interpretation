@@ -48,11 +48,11 @@
 
 ## 7. PR 7 - Live Desktop Experience and Recovery UI
 
-- [ ] 7.1 Add workbench states for live capture, provider connecting, streaming, reconnecting, degraded, error, and stopped.
-- [ ] 7.2 Keep source selection, stop, fallback, and retry controls usable during capture/provider errors.
-- [ ] 7.3 Update the floating caption window to show latest subtitle plus compact live/degraded/reconnecting status.
-- [ ] 7.4 Verify text, controls, and latency indicators remain readable across common desktop window sizes.
-- [ ] 7.5 Prepare a PR description focused only on live desktop experience and recovery UI.
+- [x] 7.1 Add workbench states for live capture, provider connecting, streaming, reconnecting, degraded, error, and stopped.
+- [x] 7.2 Keep source selection, stop, fallback, and retry controls usable during capture/provider errors.
+- [x] 7.3 Update the floating caption window to show latest subtitle plus compact live/degraded/reconnecting status.
+- [x] 7.4 Verify text, controls, and latency indicators remain readable across common desktop window sizes.
+- [x] 7.5 Prepare a PR description focused only on live desktop experience and recovery UI.
 
 ## 8. PR 8 - Desktop Scenario Verification
 
