@@ -16,8 +16,13 @@ import {
   savePreferredLanguagePair,
   supportedLanguagePairs
 } from "./language/pairs";
+import {
+  DEFAULT_REVISION_WINDOW,
+  getSubtitleContextItems,
+  reconcileSubtitleSegments
+} from "./subtitles/reconciliation";
 import { createTranslationClient } from "./translation/client";
-import type { SubtitleSegment, TranslationEvent, TranslationContextItem } from "./translation/types";
+import type { SubtitleSegment, TranslationEvent } from "./translation/types";
 import type { TtsQueueItem, TtsSessionState } from "./tts/types";
 import type {
   AudioChunkQueueState,
@@ -69,7 +74,7 @@ const initialSession: AudioSessionState = {
   error: null
 };
 
-const RECENT_REVISION_WINDOW = 4;
+const RECENT_REVISION_WINDOW = DEFAULT_REVISION_WINDOW;
 const PROVIDER_TRANSCRIPT_SEGMENT_MS = 2800;
 
 const defaultFloatingCaptionState: FloatingCaptionState = {
@@ -111,6 +116,32 @@ function getRevisionReasonLabel(reason: SubtitleSegment["revisionReason"]): stri
 
   if (reason === "translation-correction") {
     return "译文优化";
+  }
+
+  return "初始版本";
+}
+
+function getRevisionProvenanceLabel(
+  provenance: SubtitleSegment["revisionProvenance"] | undefined
+): string {
+  if (provenance === "asr-partial-correction") {
+    return "ASR临时修正";
+  }
+
+  if (provenance === "asr-finalization") {
+    return "ASR最终确认";
+  }
+
+  if (provenance === "translation-correction") {
+    return "翻译修正";
+  }
+
+  if (provenance === "provider-reconnect") {
+    return "Provider重连恢复";
+  }
+
+  if (provenance === "manual-fallback") {
+    return "源文兜底";
   }
 
   return "初始版本";
@@ -766,16 +797,10 @@ export function App() {
     const nextEvents = await Promise.all(
       changedSegments.map((segment) =>
         translationClientRef.current.translate({
-        segment,
-        languagePair: languagePairRef.current,
-        context: subtitleSegmentsRef.current.slice(0, 3).map(
-          (item): TranslationContextItem => ({
-            segmentId: item.id,
-            sourceText: item.sourceText,
-            translatedText: item.translatedText
-          })
-        )
-      })
+          segment,
+          languagePair: languagePairRef.current,
+          context: getSubtitleContextItems(subtitleSegmentsRef.current, 3)
+        })
       )
     );
 
@@ -789,58 +814,13 @@ export function App() {
     }
 
     setSubtitleSegments((current) => {
-      const byId = new Map(current.map((segment) => [segment.id, segment]));
-
-      nextEvents.forEach((event) => {
-        const asrSegment = changedSegments.find((segment) => segment.id === event.segmentId);
-
-        if (!asrSegment) {
-          return;
-        }
-
-        const existing = byId.get(event.segmentId);
-        const currentIndex = current.findIndex((segment) => segment.id === event.segmentId);
-        const canRevise =
-          !existing || (currentIndex >= 0 && currentIndex < RECENT_REVISION_WINDOW);
-
-        if (existing && !canRevise) {
-          return;
-        }
-
-        const revision = existing ? existing.revision + 1 : event.revision;
-        const status = existing
-          ? "revised"
-          : asrSegment.status === "final"
-            ? "final"
-            : "partial";
-
-        byId.set(event.segmentId, {
-          id: event.segmentId,
-          sourceText: event.sourceText,
-          translatedText: event.translatedText,
-          sourceLanguage: event.sourceLanguage,
-          targetLanguage: event.targetLanguage,
-          status,
-          revision,
-          revisionReason: existing ? event.revisionReason : "initial",
-          startedAtMs: asrSegment.startedAtMs,
-          endedAtMs: asrSegment.endedAtMs,
-          updatedAtMs: event.createdAtMs,
-          asrLatencyMs: asrSegment.latencyMs,
-          translationLatencyMs: event.latencyMs,
-          totalLatencyMs: asrSegment.latencyMs + event.latencyMs,
-          contextSize: event.contextSize,
-          translationProvider: event.provider,
-          translationModel: event.model,
-          translationError: event.error,
-          translationFallback: event.fallback,
-          revised: Boolean(existing)
-        });
+      const { segments: nextSegments } = reconcileSubtitleSegments({
+        current,
+        translationEvents: nextEvents,
+        asrSegments: changedSegments,
+        revisionWindow: RECENT_REVISION_WINDOW,
+        providerConnectionState: providerHealthRef.current?.session.state ?? null
       });
-
-      const nextSegments = Array.from(byId.values())
-        .sort((left, right) => right.startedAtMs - left.startedAtMs)
-        .slice(0, 6);
       subtitleSegmentsRef.current = nextSegments;
       return nextSegments;
     });
@@ -1492,6 +1472,11 @@ export function App() {
     : providerHealth
       ? `${providerHealth.config.translationProvider}/${providerHealth.config.translationModel}`
       : "检测中";
+  const latestRevisionLabel = latestSubtitleSegment
+    ? `${latestSubtitleSegment.revision} · ${getRevisionProvenanceLabel(
+        latestSubtitleSegment.revisionProvenance
+      )}`
+    : "等待字幕";
 
   const metrics = [
     { label: "音频源", value: getSourceLabel(session.sourceType) },
@@ -1545,6 +1530,7 @@ export function App() {
       value: getProviderConnectionLabel(providerHealth?.session.state)
     },
     { label: "修订窗口", value: `${RECENT_REVISION_WINDOW} 条` },
+    { label: "最近修订", value: latestRevisionLabel },
     { label: "悬浮窗", value: floatingCaptionVisible ? "已打开" : "未打开" },
     { label: "语音播报", value: getTtsStatusLabel(ttsSession.status) },
     { label: "语言方向", value: activeLanguagePair.label }
@@ -1919,6 +1905,7 @@ export function App() {
                   </p>
                   <p className="history-footnote">
                     版本 {segment.revision} · {getRevisionReasonLabel(segment.revisionReason)} ·
+                    {getRevisionProvenanceLabel(segment.revisionProvenance)} ·
                     上下文 {segment.contextSize} · {segment.translationProvider}/
                     {segment.translationModel} · 延迟 {segment.totalLatencyMs} ms
                     {segment.translationFallback ? " · 源文兜底" : ""}

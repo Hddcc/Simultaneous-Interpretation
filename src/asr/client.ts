@@ -1,6 +1,5 @@
 import type { NormalizedAudioChunk } from "../audio/types";
-import type { LanguagePair } from "../language/pairs";
-import type { AsrClient, AsrConfig, AsrEvent } from "./types";
+import type { AsrClient, AsrConfig, AsrEvent, AsrLanguagePair } from "./types";
 
 const ENGLISH_SEGMENTS = [
   "Welcome to today's session about realtime speech systems.",
@@ -16,7 +15,7 @@ const CHINESE_SEGMENTS = [
   "这个设计能让字幕保持流畅，并为后续修正留出空间。"
 ];
 
-function usesEnglishSource(languagePair: LanguagePair): boolean {
+function usesEnglishSource(languagePair: AsrLanguagePair): boolean {
   return languagePair.source.code.startsWith("en");
 }
 
@@ -41,7 +40,7 @@ export function createStreamingAsrClient(config: AsrConfig): AsrClient {
     reset() {
       finalizedSegments.clear();
     },
-    pushChunk(chunk: NormalizedAudioChunk, languagePair: LanguagePair): AsrEvent[] {
+    pushChunk(chunk: NormalizedAudioChunk, languagePair: AsrLanguagePair): AsrEvent[] {
       const segmentIndex = Math.floor(chunk.sequence / 3);
       const revision = (chunk.sequence % 3) + 1;
       const status = revision === 3 ? "final" : "partial";

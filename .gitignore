@@ -27,3 +27,4 @@ Thumbs.db
 
 # Local agent/tooling state
 .codex/
+.tmp-subtitle-tests/

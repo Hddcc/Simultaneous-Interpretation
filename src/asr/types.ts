@@ -1,5 +1,4 @@
 import type { AudioSourceType, NormalizedAudioChunk } from "../audio/types";
-import type { LanguagePair } from "../language/pairs";
 
 export type AiProvider = "mock" | "openai" | "custom";
 
@@ -40,8 +39,14 @@ export interface AsrSegment {
   revision: number;
 }
 
+export interface AsrLanguagePair {
+  source: {
+    code: string;
+  };
+}
+
 export interface AsrClient {
   getConfig(): AsrConfig;
   reset(): void;
-  pushChunk(chunk: NormalizedAudioChunk, languagePair: LanguagePair): AsrEvent[];
+  pushChunk(chunk: NormalizedAudioChunk, languagePair: AsrLanguagePair): AsrEvent[];
 }
