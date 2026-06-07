@@ -109,6 +109,7 @@ declare global {
     | "missing-config"
     | "connecting"
     | "streaming"
+    | "reconnecting"
     | "degraded"
     | "closing"
     | "closed"
@@ -160,7 +161,52 @@ declare global {
   interface StartRealtimeProviderSessionRequest {
     sourceType: "system" | "microphone";
     languagePairId: string;
+    sourceLanguageCode?: string;
     queue: RealtimeProviderQueueSnapshot;
+  }
+
+  interface RealtimeProviderAudioPayload {
+    encoding: "pcm16-base64";
+    sampleFormat: "s16le";
+    sampleRate: number;
+    channels: number;
+    frameCount: number;
+    byteLength: number;
+    durationMs: number;
+    data: string;
+  }
+
+  interface AppendRealtimeProviderAudioChunkRequest {
+    id: string;
+    sourceType: "system" | "microphone";
+    sequence: number;
+    timestampMs: number;
+    durationMs: number;
+    volume: number;
+    queue: RealtimeProviderQueueSnapshot;
+    payload: RealtimeProviderAudioPayload;
+  }
+
+  interface RealtimeProviderAsrEvent {
+    id: string;
+    segmentId: string;
+    chunkId: string;
+    sourceType: "system" | "microphone";
+    sequence: number;
+    audioStartMs: number;
+    audioEndMs: number;
+    text: string;
+    status: "partial" | "final";
+    revision: number;
+    receivedAtMs: number;
+    latencyMs: number;
+    provider: "mock" | "openai" | "custom";
+    model: string;
+  }
+
+  interface AppendRealtimeProviderAudioChunkResponse {
+    health: ProviderHealth;
+    events: RealtimeProviderAsrEvent[];
   }
 
   interface Window {
@@ -185,6 +231,10 @@ declare global {
       updateRealtimeProviderQueueState: (
         queue: RealtimeProviderQueueSnapshot
       ) => Promise<ProviderHealth>;
+      appendRealtimeProviderAudioChunk: (
+        chunk: AppendRealtimeProviderAudioChunkRequest
+      ) => Promise<AppendRealtimeProviderAudioChunkResponse>;
+      pullRealtimeProviderAsrEvents: () => Promise<RealtimeProviderAsrEvent[]>;
       stopRealtimeProviderSession: () => Promise<ProviderHealth>;
       translateText: (request: TranslateTextRequest) => Promise<TranslateTextResponse>;
       transcribeLocalMediaFile: (

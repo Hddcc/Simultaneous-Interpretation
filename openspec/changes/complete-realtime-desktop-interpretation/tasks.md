@@ -24,11 +24,11 @@
 
 ## 4. PR 4 - Realtime ASR Streaming
 
-- [ ] 4.1 Implement the realtime ASR session client for live audio chunks using the selected provider path.
-- [ ] 4.2 Stream microphone audio chunks to ASR and emit partial/final recognition events with stable segment IDs.
-- [ ] 4.3 Stream system playback audio chunks to ASR and emit partial/final recognition events without requiring file upload.
-- [ ] 4.4 Add retry, stop, timeout, and missing-key behavior for ASR sessions.
-- [ ] 4.5 Prepare a PR description focused only on realtime ASR streaming.
+- [x] 4.1 Implement the realtime ASR session client for live audio chunks using the selected provider path.
+- [x] 4.2 Stream microphone audio chunks to ASR and emit partial/final recognition events with stable segment IDs.
+- [x] 4.3 Stream system playback audio chunks to ASR and emit partial/final recognition events without requiring file upload.
+- [x] 4.4 Add retry, stop, timeout, and missing-key behavior for ASR sessions.
+- [x] 4.5 Prepare a PR description focused only on realtime ASR streaming.
 
 ## 5. PR 5 - Provider Translation and Context
 

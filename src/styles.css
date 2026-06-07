@@ -337,6 +337,7 @@ button {
 .capture-helper-missing span,
 .capture-unsupported-platform span,
 .provider-missing-config span,
+.provider-reconnecting span,
 .provider-degraded span,
 .provider-error span {
   color: #fed7aa;
