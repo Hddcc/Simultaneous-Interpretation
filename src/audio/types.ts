@@ -1,6 +1,6 @@
 export type AudioSourceType = "system" | "microphone" | "file";
 
-export type StreamStatus = "idle" | "ready" | "streaming" | "paused" | "error";
+export type StreamStatus = "idle" | "ready" | "streaming" | "paused" | "stopped" | "error";
 
 export interface AudioSourceOption {
   type: AudioSourceType;

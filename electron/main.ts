@@ -31,6 +31,8 @@ interface FloatingCaptionState {
   translatedText: string;
   sourceText: string;
   statusLabel: string;
+  compactStatusLabel: string;
+  severity: "neutral" | "active" | "warning" | "error";
   languageDirection: string;
   sessionStatus: string;
   latencyLabel: string;
