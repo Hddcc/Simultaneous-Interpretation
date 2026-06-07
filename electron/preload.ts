@@ -86,6 +86,7 @@ type ProviderConnectionState =
   | "missing-config"
   | "connecting"
   | "streaming"
+  | "reconnecting"
   | "degraded"
   | "closing"
   | "closed"
@@ -137,7 +138,52 @@ interface ProviderHealth {
 interface StartRealtimeProviderSessionRequest {
   sourceType: "system" | "microphone";
   languagePairId: string;
+  sourceLanguageCode?: string;
   queue: RealtimeProviderQueueSnapshot;
+}
+
+interface RealtimeProviderAudioPayload {
+  encoding: "pcm16-base64";
+  sampleFormat: "s16le";
+  sampleRate: number;
+  channels: number;
+  frameCount: number;
+  byteLength: number;
+  durationMs: number;
+  data: string;
+}
+
+interface AppendRealtimeProviderAudioChunkRequest {
+  id: string;
+  sourceType: "system" | "microphone";
+  sequence: number;
+  timestampMs: number;
+  durationMs: number;
+  volume: number;
+  queue: RealtimeProviderQueueSnapshot;
+  payload: RealtimeProviderAudioPayload;
+}
+
+interface RealtimeProviderAsrEvent {
+  id: string;
+  segmentId: string;
+  chunkId: string;
+  sourceType: "system" | "microphone";
+  sequence: number;
+  audioStartMs: number;
+  audioEndMs: number;
+  text: string;
+  status: "partial" | "final";
+  revision: number;
+  receivedAtMs: number;
+  latencyMs: number;
+  provider: "mock" | "openai" | "custom";
+  model: string;
+}
+
+interface AppendRealtimeProviderAudioChunkResponse {
+  health: ProviderHealth;
+  events: RealtimeProviderAsrEvent[];
 }
 
 contextBridge.exposeInMainWorld("simultaneousInterpretation", {
@@ -158,6 +204,9 @@ contextBridge.exposeInMainWorld("simultaneousInterpretation", {
     ipcRenderer.invoke("provider:start-realtime-session", request),
   updateRealtimeProviderQueueState: (queue: RealtimeProviderQueueSnapshot) =>
     ipcRenderer.invoke("provider:update-queue-state", queue),
+  appendRealtimeProviderAudioChunk: (chunk: AppendRealtimeProviderAudioChunkRequest) =>
+    ipcRenderer.invoke("provider:append-audio-chunk", chunk),
+  pullRealtimeProviderAsrEvents: () => ipcRenderer.invoke("provider:pull-asr-events"),
   stopRealtimeProviderSession: () => ipcRenderer.invoke("provider:stop-realtime-session"),
   translateText: (request: TranslateTextRequest) => ipcRenderer.invoke("ai:translate-text", request),
   transcribeLocalMediaFile: (request: TranscribeLocalMediaFileRequest) =>

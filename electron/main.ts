@@ -3,11 +3,14 @@ import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { detectNativeSystemAudioCapability } from "./nativeAudioCapability";
 import {
+  appendRealtimeProviderAudioChunk,
   getProviderHealth,
   getProviderRuntimeConfig,
+  pullRealtimeProviderAsrEvents,
   startRealtimeProviderSession,
   stopRealtimeProviderSession,
   updateRealtimeProviderQueueState,
+  type AppendRealtimeProviderAudioChunkRequest,
   type RealtimeProviderQueueSnapshot,
   type StartRealtimeProviderSessionRequest
 } from "./providerSession";
@@ -505,6 +508,14 @@ ipcMain.handle(
   "provider:update-queue-state",
   (_event, queue: RealtimeProviderQueueSnapshot) => updateRealtimeProviderQueueState(queue)
 );
+
+ipcMain.handle(
+  "provider:append-audio-chunk",
+  (_event, chunk: AppendRealtimeProviderAudioChunkRequest) =>
+    appendRealtimeProviderAudioChunk(chunk)
+);
+
+ipcMain.handle("provider:pull-asr-events", () => pullRealtimeProviderAsrEvents());
 
 ipcMain.handle("provider:stop-realtime-session", () => stopRealtimeProviderSession());
 

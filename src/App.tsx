@@ -173,6 +173,10 @@ function getProviderConnectionLabel(state: ProviderConnectionState | undefined):
     return "流式会话";
   }
 
+  if (state === "reconnecting") {
+    return "重连中";
+  }
+
   if (state === "degraded") {
     return "队列拥塞";
   }
@@ -434,6 +438,18 @@ export function App() {
   }, [appInfo]);
 
   useEffect(() => {
+    if (!appInfo?.pullRealtimeProviderAsrEvents || !providerHealth?.session.sessionId) {
+      return undefined;
+    }
+
+    const timer = window.setInterval(() => {
+      void appInfo.pullRealtimeProviderAsrEvents?.().then(publishRealtimeProviderAsrEvents);
+    }, 500);
+
+    return () => window.clearInterval(timer);
+  }, [appInfo, providerHealth?.session.sessionId]);
+
+  useEffect(() => {
     return () => {
       window.speechSynthesis?.cancel();
     };
@@ -519,6 +535,51 @@ export function App() {
     return Boolean(health?.config.realtimeEnabled);
   }
 
+  function publishRealtimeProviderAsrEvents(events: RealtimeProviderAsrEvent[]): void {
+    if (events.length === 0) {
+      return;
+    }
+
+    const asrEventsFromProvider: AsrEvent[] = events.map((event) => ({
+      id: event.id,
+      segmentId: event.segmentId,
+      chunkId: event.chunkId,
+      sourceType: event.sourceType,
+      sequence: event.sequence,
+      audioStartMs: event.audioStartMs,
+      audioEndMs: event.audioEndMs,
+      text: event.text,
+      status: event.status,
+      revision: event.revision,
+      receivedAtMs: event.receivedAtMs,
+      latencyMs: event.latencyMs
+    }));
+
+    const nextSegments: AsrSegment[] = asrEventsFromProvider.map((event) => ({
+      id: event.segmentId,
+      sourceType: event.sourceType,
+      text: event.text,
+      status: event.status,
+      startedAtMs: event.audioStartMs,
+      endedAtMs: event.audioEndMs,
+      updatedAtMs: event.receivedAtMs,
+      latencyMs: event.latencyMs,
+      revision: event.revision
+    }));
+
+    setAsrEvents((current) => [...asrEventsFromProvider, ...current].slice(0, 8));
+    setAsrSegments((current) => {
+      const byId = new Map(current.map((segment) => [segment.id, segment]));
+      nextSegments.forEach((segment) => {
+        byId.set(segment.id, segment);
+      });
+      return Array.from(byId.values())
+        .sort((left, right) => right.updatedAtMs - left.updatedAtMs)
+        .slice(0, 6);
+    });
+    void publishTranslationEvents(nextSegments);
+  }
+
   async function startRealtimeProviderShell(sourceType: "system" | "microphone"): Promise<void> {
     const currentHealth = providerHealthRef.current ?? providerHealth ?? (await refreshProviderStatus());
 
@@ -529,6 +590,7 @@ export function App() {
     const nextHealth = await appInfo.startRealtimeProviderSession({
       sourceType,
       languagePairId: activeLanguagePair.id,
+      sourceLanguageCode: activeLanguagePair.source.code,
       queue: toProviderQueueSnapshot(initialQueueState)
     });
     providerHealthRef.current = nextHealth;
@@ -564,6 +626,46 @@ export function App() {
       providerHealthRef.current = nextHealth;
       setProviderHealth(nextHealth);
     });
+  }
+
+  async function streamChunkToRealtimeProvider(
+    chunk: NormalizedAudioChunk,
+    queue: AudioChunkQueueState
+  ): Promise<void> {
+    if (
+      chunk.sourceType === "file" ||
+      !chunk.payload ||
+      chunk.payload.encoding !== "pcm16-base64" ||
+      chunk.payload.sampleFormat !== "s16le" ||
+      !appInfo?.appendRealtimeProviderAudioChunk
+    ) {
+      return;
+    }
+
+    const payload: RealtimeProviderAudioPayload = {
+      encoding: "pcm16-base64",
+      sampleFormat: "s16le",
+      sampleRate: chunk.payload.sampleRate,
+      channels: chunk.payload.channels,
+      frameCount: chunk.payload.frameCount,
+      byteLength: chunk.payload.byteLength,
+      durationMs: chunk.payload.durationMs,
+      data: chunk.payload.data
+    };
+
+    const response = await appInfo.appendRealtimeProviderAudioChunk({
+      id: chunk.id,
+      sourceType: chunk.sourceType,
+      sequence: chunk.sequence,
+      timestampMs: chunk.timestampMs,
+      durationMs: chunk.durationMs,
+      volume: chunk.volume,
+      queue: toProviderQueueSnapshot(queue),
+      payload
+    });
+    providerHealthRef.current = response.health;
+    setProviderHealth(response.health);
+    publishRealtimeProviderAsrEvents(response.events);
   }
 
   function updatePayloadQueue(
@@ -606,6 +708,18 @@ export function App() {
     }));
     syncProviderQueue(nextQueue);
     setRecentChunks((current) => [chunk, ...current].slice(0, 5));
+
+    if (shouldUseRealtimeProviderShell(providerHealthRef.current)) {
+      void streamChunkToRealtimeProvider(chunk, nextQueue).catch((error) => {
+        setSession((current) => ({
+          ...current,
+          status: "error",
+          error: error instanceof Error ? error.message : "实时 ASR 音频发送失败。"
+        }));
+      });
+      return;
+    }
+
     publishAsrEvents(chunk);
   }
 
