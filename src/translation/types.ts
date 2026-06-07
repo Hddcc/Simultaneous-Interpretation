@@ -1,5 +1,4 @@
 import type { AsrSegment } from "../asr/types";
-import type { LanguagePair } from "../language/pairs";
 
 export interface TranslationContextItem {
   segmentId: string;
@@ -7,9 +6,24 @@ export interface TranslationContextItem {
   translatedText: string;
 }
 
+export interface TranslationLanguagePair {
+  id: string;
+  source: {
+    code: string;
+    label: string;
+    translationLocale: string;
+  };
+  target: {
+    code: string;
+    label: string;
+    translationLocale: string;
+  };
+  translationModel: string;
+}
+
 export interface TranslationRequest {
   segment: AsrSegment;
-  languagePair: LanguagePair;
+  languagePair: TranslationLanguagePair;
   context: TranslationContextItem[];
 }
 
@@ -33,6 +47,14 @@ export interface TranslationEvent {
   fallback: boolean;
 }
 
+export type SubtitleRevisionProvenance =
+  | "initial"
+  | "asr-partial-correction"
+  | "asr-finalization"
+  | "translation-correction"
+  | "provider-reconnect"
+  | "manual-fallback";
+
 export interface SubtitleSegment {
   id: string;
   sourceText: string;
@@ -42,6 +64,7 @@ export interface SubtitleSegment {
   status: "partial" | "final" | "revised";
   revision: number;
   revisionReason: "initial" | "asr-correction" | "translation-correction";
+  revisionProvenance: SubtitleRevisionProvenance;
   startedAtMs: number;
   endedAtMs: number;
   updatedAtMs: number;

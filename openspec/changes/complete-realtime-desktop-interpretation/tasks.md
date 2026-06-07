@@ -40,11 +40,11 @@
 
 ## 6. PR 6 - Realtime Subtitle Revision Reconciliation
 
-- [ ] 6.1 Reconcile realtime ASR partial/final events with existing subtitle segment IDs and revision numbers.
-- [ ] 6.2 Apply translation revisions in place when final ASR or improved translation output supersedes earlier text.
-- [ ] 6.3 Record revision provenance such as ASR partial correction, ASR finalization, translation correction, reconnect, or fallback.
-- [ ] 6.4 Verify old subtitles outside the revision window remain stable while recent subtitles can update.
-- [ ] 6.5 Prepare a PR description focused only on realtime subtitle correction.
+- [x] 6.1 Reconcile realtime ASR partial/final events with existing subtitle segment IDs and revision numbers.
+- [x] 6.2 Apply translation revisions in place when final ASR or improved translation output supersedes earlier text.
+- [x] 6.3 Record revision provenance such as ASR partial correction, ASR finalization, translation correction, reconnect, or fallback.
+- [x] 6.4 Verify old subtitles outside the revision window remain stable while recent subtitles can update.
+- [x] 6.5 Prepare a PR description focused only on realtime subtitle correction.
 
 ## 7. PR 7 - Live Desktop Experience and Recovery UI
 
