@@ -780,6 +780,14 @@ export function App() {
     );
 
     setTranslationEvents((current) => [...nextEvents, ...current].slice(0, 8));
+    const failedTranslation = nextEvents.find((event) => event.error);
+    if (failedTranslation?.error) {
+      setSession((current) => ({
+        ...current,
+        error: `翻译服务：${failedTranslation.error}`
+      }));
+    }
+
     setSubtitleSegments((current) => {
       const byId = new Map(current.map((segment) => [segment.id, segment]));
 
@@ -822,6 +830,10 @@ export function App() {
           translationLatencyMs: event.latencyMs,
           totalLatencyMs: asrSegment.latencyMs + event.latencyMs,
           contextSize: event.contextSize,
+          translationProvider: event.provider,
+          translationModel: event.model,
+          translationError: event.error,
+          translationFallback: event.fallback,
           revised: Boolean(existing)
         });
       });
@@ -1473,15 +1485,40 @@ export function App() {
     }
   }
 
+  const translationProviderLabel = latestTranslationEvent
+    ? `${latestTranslationEvent.provider}/${latestTranslationEvent.model}${
+        latestTranslationEvent.fallback ? " fallback" : ""
+      }`
+    : providerHealth
+      ? `${providerHealth.config.translationProvider}/${providerHealth.config.translationModel}`
+      : "检测中";
+
   const metrics = [
     { label: "音频源", value: getSourceLabel(session.sourceType) },
     { label: "输入状态", value: session.status },
     { label: "音频块", value: String(session.chunksProduced) },
     { label: "ASR", value: providerHealth?.config.asrModel ?? `${asrConfig.provider}/${asrConfig.model}` },
+    { label: "翻译模型", value: translationProviderLabel },
     { label: "Provider", value: getProviderModeLabel(providerHealth) },
     {
       label: "API Key",
       value: getProviderKeyLabel(providerHealth)
+    },
+    {
+      label: "ASR延迟",
+      value: latestSubtitleSegment
+        ? `${latestSubtitleSegment.asrLatencyMs} ms`
+        : latestAsrEvent
+          ? `${latestAsrEvent.latencyMs} ms`
+          : "等待字幕"
+    },
+    {
+      label: "翻译延迟",
+      value: latestSubtitleSegment
+        ? `${latestSubtitleSegment.translationLatencyMs} ms`
+        : latestTranslationEvent
+          ? `${latestTranslationEvent.latencyMs} ms`
+          : "等待译文"
     },
     {
       label: "字幕延迟",
@@ -1630,6 +1667,14 @@ export function App() {
                 </span>
                 {latestSubtitleSegment ? (
                   <span>{latestSubtitleSegment.totalLatencyMs} ms</span>
+                ) : null}
+                {latestSubtitleSegment && latestTranslationEvent ? (
+                  <span>
+                    {latestTranslationEvent.provider}/{latestTranslationEvent.model}
+                  </span>
+                ) : null}
+                {latestSubtitleSegment && latestTranslationEvent?.fallback ? (
+                  <span>源文保留</span>
                 ) : null}
               </div>
             ) : null}
@@ -1874,7 +1919,9 @@ export function App() {
                   </p>
                   <p className="history-footnote">
                     版本 {segment.revision} · {getRevisionReasonLabel(segment.revisionReason)} ·
-                    上下文 {segment.contextSize} · 延迟 {segment.totalLatencyMs} ms
+                    上下文 {segment.contextSize} · {segment.translationProvider}/
+                    {segment.translationModel} · 延迟 {segment.totalLatencyMs} ms
+                    {segment.translationFallback ? " · 源文兜底" : ""}
                   </p>
                 </article>
               ))

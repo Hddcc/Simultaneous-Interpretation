@@ -1,5 +1,13 @@
-import type { TranslationClient, TranslationRequest } from "./types";
-import type { TranslationEvent } from "./types";
+import type { TranslationClient, TranslationEvent, TranslationRequest } from "./types";
+
+type TranslationProvider = TranslationEvent["provider"];
+
+interface TranslationMetadata {
+  provider: TranslationProvider;
+  model: string;
+  error: string | null;
+  fallback: boolean;
+}
 
 const ENGLISH_TO_CHINESE: Record<string, string> = {
   "Welcome to today's session about realtime speech systems.":
@@ -17,7 +25,7 @@ const CHINESE_TO_ENGLISH: Record<string, string> = {
     "Welcome to today's session about realtime speech systems.",
   "这条链路会接收小段音频，并快速发布原文字幕。":
     "The pipeline receives small audio chunks and publishes source text quickly.",
-  "临时识别结果可能在最终事件到达前继续更新。":
+  "临时识别结果可能会在最终事件到达前继续更新。":
     "Partial recognition results may continue updating before the final event arrives.",
   "这个设计能让字幕保持流畅，并为后续修正留出空间。":
     "This design keeps captions smooth and leaves room for later corrections."
@@ -35,10 +43,15 @@ function createFallbackTranslation(request: TranslationRequest): string {
     : request.segment.text;
 }
 
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "真实翻译服务调用失败。";
+}
+
 function createBaseTranslationEvent(
   request: TranslationRequest,
   translatedText: string,
-  latencyMs: number
+  latencyMs: number,
+  metadata: TranslationMetadata
 ): TranslationEvent {
   const createdAtMs = Date.now();
   const revisionReason =
@@ -61,24 +74,77 @@ function createBaseTranslationEvent(
     revisionReason,
     createdAtMs,
     latencyMs,
-    contextSize: request.context.length
+    contextSize: request.context.length,
+    provider: metadata.provider,
+    model: metadata.model,
+    error: metadata.error,
+    fallback: metadata.fallback
   };
 }
 
-function createMockTranslationEvent(request: TranslationRequest) {
+function createMockTranslationEvent(request: TranslationRequest): TranslationEvent {
   const dictionary =
     request.languagePair.target.code === "zh-CN" ? ENGLISH_TO_CHINESE : CHINESE_TO_ENGLISH;
   const translatedText = dictionary[request.segment.text] ?? createFallbackTranslation(request);
   const latencyMs = 420 + request.context.length * 60;
 
-  return createBaseTranslationEvent(request, translatedText, latencyMs);
+  return createBaseTranslationEvent(request, translatedText, latencyMs, {
+    provider: "mock",
+    model: "mock-bilingual-translator",
+    error: null,
+    fallback: false
+  });
 }
 
-async function createProviderTranslationEvent(request: TranslationRequest) {
+function createFallbackTranslationEvent(
+  request: TranslationRequest,
+  latencyMs: number,
+  provider: TranslationProvider,
+  model: string,
+  error: unknown
+): TranslationEvent {
+  return createBaseTranslationEvent(request, request.segment.text, latencyMs, {
+    provider,
+    model,
+    error: getErrorMessage(error),
+    fallback: true
+  });
+}
+
+async function getTranslationProviderHealth(): Promise<ProviderHealth | null> {
   const api = window.simultaneousInterpretation;
 
-  if (!api?.translateText || request.segment.status !== "final") {
+  if (!api?.getProviderHealth) {
+    return null;
+  }
+
+  try {
+    return await api.getProviderHealth();
+  } catch {
+    return null;
+  }
+}
+
+async function createProviderTranslationEvent(request: TranslationRequest): Promise<TranslationEvent> {
+  const api = window.simultaneousInterpretation;
+  const health = await getTranslationProviderHealth();
+  const provider = health?.config.translationProvider ?? "mock";
+  const model = health?.config.translationModel ?? request.languagePair.translationModel;
+
+  if (provider === "mock" || request.segment.status !== "final") {
     return createMockTranslationEvent(request);
+  }
+
+  const startedAtMs = Date.now();
+
+  if (!api?.translateText) {
+    return createFallbackTranslationEvent(
+      request,
+      Date.now() - startedAtMs,
+      provider,
+      model,
+      new Error("当前运行环境没有暴露翻译接口。")
+    );
   }
 
   try {
@@ -86,25 +152,31 @@ async function createProviderTranslationEvent(request: TranslationRequest) {
       text: request.segment.text,
       sourceLanguage: request.languagePair.source.translationLocale,
       targetLanguage: request.languagePair.target.translationLocale,
-      model: request.languagePair.translationModel,
+      model,
       context: request.context
     });
 
-    return createBaseTranslationEvent(request, response.text, response.latencyMs);
+    return createBaseTranslationEvent(request, response.text, response.latencyMs, {
+      provider: response.provider,
+      model: response.model,
+      error: null,
+      fallback: false
+    });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "真实翻译服务调用失败。";
-    return createBaseTranslationEvent(request, `翻译服务暂不可用：${message}`, 0);
+    return createFallbackTranslationEvent(
+      request,
+      Date.now() - startedAtMs,
+      provider,
+      model,
+      error
+    );
   }
 }
 
 export function createTranslationClient(): TranslationClient {
   return {
     translate(request: TranslationRequest) {
-      if (import.meta.env.VITE_AI_PROVIDER === "openai") {
-        return createProviderTranslationEvent(request);
-      }
-
-      return Promise.resolve(createMockTranslationEvent(request));
+      return createProviderTranslationEvent(request);
     }
   };
 }

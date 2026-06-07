@@ -27,6 +27,10 @@ export interface TranslationEvent {
   createdAtMs: number;
   latencyMs: number;
   contextSize: number;
+  provider: "mock" | "openai" | "deepseek" | "custom";
+  model: string;
+  error: string | null;
+  fallback: boolean;
 }
 
 export interface SubtitleSegment {
@@ -45,6 +49,10 @@ export interface SubtitleSegment {
   translationLatencyMs: number;
   totalLatencyMs: number;
   contextSize: number;
+  translationProvider: "mock" | "openai" | "deepseek" | "custom";
+  translationModel: string;
+  translationError: string | null;
+  translationFallback: boolean;
   revised: boolean;
 }
 

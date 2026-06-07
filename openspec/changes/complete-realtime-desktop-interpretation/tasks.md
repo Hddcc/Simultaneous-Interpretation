@@ -32,11 +32,11 @@
 
 ## 5. PR 5 - Provider Translation and Context
 
-- [ ] 5.1 Implement provider-backed translation for stable ASR segments using recent source/target context.
-- [ ] 5.2 Support OpenAI as the default translation path and DeepSeek-compatible text translation as an optional translation provider.
-- [ ] 5.3 Add translation error handling that keeps source text visible when translation fails.
-- [ ] 5.4 Display ASR latency, translation latency, total latency, and provider model labels in the workbench.
-- [ ] 5.5 Prepare a PR description focused only on provider translation and context.
+- [x] 5.1 Implement provider-backed translation for stable ASR segments using recent source/target context.
+- [x] 5.2 Support OpenAI as the default translation path and DeepSeek-compatible text translation as an optional translation provider.
+- [x] 5.3 Add translation error handling that keeps source text visible when translation fails.
+- [x] 5.4 Display ASR latency, translation latency, total latency, and provider model labels in the workbench.
+- [x] 5.5 Prepare a PR description focused only on provider translation and context.
 
 ## 6. PR 6 - Realtime Subtitle Revision Reconciliation
 

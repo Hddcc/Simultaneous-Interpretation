@@ -67,6 +67,7 @@ interface TranslateTextRequest {
 
 interface TranslateTextResponse {
   text: string;
+  provider: "openai" | "deepseek" | "custom";
   model: string;
   latencyMs: number;
 }
@@ -95,6 +96,14 @@ interface OpenAiResponseOutput {
     content?: Array<{
       text?: string;
     }>;
+  }>;
+}
+
+interface ChatCompletionOutput {
+  choices?: Array<{
+    message?: {
+      content?: string;
+    };
   }>;
 }
 
@@ -176,6 +185,16 @@ function getOpenAiKey(): string {
   return apiKey;
 }
 
+function getDeepSeekKey(): string {
+  const apiKey = process.env.DEEPSEEK_API_KEY;
+
+  if (!apiKey) {
+    throw new Error("请先在 .env 中配置 DEEPSEEK_API_KEY。");
+  }
+
+  return apiKey;
+}
+
 function readOpenAiError(payload: OpenAiErrorResponse): string {
   return payload.error?.message || "OpenAI 请求失败。";
 }
@@ -195,6 +214,48 @@ function readOpenAiOutputText(payload: OpenAiResponseOutput): string {
   }
 
   return text.trim();
+}
+
+function readChatCompletionText(payload: ChatCompletionOutput): string {
+  const text = payload.choices
+    ?.map((choice) => choice.message?.content)
+    .find((value): value is string => Boolean(value?.trim()));
+
+  if (!text) {
+    throw new Error("兼容翻译接口返回结果中没有可用文本。");
+  }
+
+  return text.trim();
+}
+
+function buildProviderEndpoint(baseUrl: string, pathSuffix: string): string {
+  return `${baseUrl.replace(/\/+$/, "")}${pathSuffix}`;
+}
+
+function buildTranslationContextText(request: TranslateTextRequest): string {
+  if (!request.context || request.context.length === 0) {
+    return "No previous subtitle context.";
+  }
+
+  return request.context
+    .map((item, index) => `${index + 1}. ${item.sourceText} => ${item.translatedText}`)
+    .join("\n");
+}
+
+function buildTranslationMessages(request: TranslateTextRequest) {
+  const contextText = buildTranslationContextText(request);
+
+  return [
+    {
+      role: "system",
+      content:
+        "You are a realtime conference interpreter. Translate faithfully, keep terminology stable, use recent context for correction, and return only the translated text."
+    },
+    {
+      role: "user",
+      content: `Translate from ${request.sourceLanguage} to ${request.targetLanguage}.\n\nRecent context:\n${contextText}\n\nText:\n${request.text}`
+    }
+  ];
 }
 
 function getMediaMimeType(filePath: string): string {
@@ -227,17 +288,14 @@ function normalizeOpenAiLanguage(languageCode: string): string {
   return languageCode.toLowerCase().startsWith("zh") ? "zh" : "en";
 }
 
-async function translateWithOpenAi(request: TranslateTextRequest): Promise<TranslateTextResponse> {
+async function translateWithOpenAi(
+  request: TranslateTextRequest,
+  runtimeConfig = getAiRuntimeConfig()
+): Promise<TranslateTextResponse> {
   const startedAtMs = Date.now();
-  const model = request.model || getAiRuntimeConfig().translationModel;
-  const contextText =
-    request.context && request.context.length > 0
-      ? request.context
-          .map((item, index) => `${index + 1}. ${item.sourceText} => ${item.translatedText}`)
-          .join("\n")
-      : "No previous subtitle context.";
+  const model = request.model || runtimeConfig.translationModel;
 
-  const response = await fetch("https://api.openai.com/v1/responses", {
+  const response = await fetch(buildProviderEndpoint(runtimeConfig.translationBaseUrl, "/responses"), {
     method: "POST",
     headers: {
       Authorization: `Bearer ${getOpenAiKey()}`,
@@ -245,17 +303,7 @@ async function translateWithOpenAi(request: TranslateTextRequest): Promise<Trans
     },
     body: JSON.stringify({
       model,
-      input: [
-        {
-          role: "system",
-          content:
-            "You are a realtime conference interpreter. Translate faithfully, keep terminology stable, and return only the translated text."
-        },
-        {
-          role: "user",
-          content: `Translate from ${request.sourceLanguage} to ${request.targetLanguage}.\n\nRecent context:\n${contextText}\n\nText:\n${request.text}`
-        }
-      ]
+      input: buildTranslationMessages(request)
     })
   });
 
@@ -267,9 +315,87 @@ async function translateWithOpenAi(request: TranslateTextRequest): Promise<Trans
 
   return {
     text: readOpenAiOutputText(payload),
+    provider: "openai",
     model,
     latencyMs: Date.now() - startedAtMs
   };
+}
+
+async function translateWithOpenAiCompatible(
+  request: TranslateTextRequest,
+  provider: "deepseek" | "custom",
+  apiKey: string,
+  baseUrl: string,
+  model: string
+): Promise<TranslateTextResponse> {
+  const startedAtMs = Date.now();
+  const response = await fetch(buildProviderEndpoint(baseUrl, "/chat/completions"), {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model,
+      messages: buildTranslationMessages(request),
+      temperature: 0.2
+    })
+  });
+
+  const payload = (await response.json()) as ChatCompletionOutput & OpenAiErrorResponse;
+
+  if (!response.ok) {
+    throw new Error(readOpenAiError(payload));
+  }
+
+  return {
+    text: readChatCompletionText(payload),
+    provider,
+    model,
+    latencyMs: Date.now() - startedAtMs
+  };
+}
+
+function getCustomTranslationKey(): string {
+  return process.env.CUSTOM_TRANSLATION_API_KEY || process.env.OPENAI_API_KEY || "";
+}
+
+async function translateWithConfiguredProvider(
+  request: TranslateTextRequest
+): Promise<TranslateTextResponse> {
+  const runtimeConfig = getAiRuntimeConfig();
+  const model = request.model || runtimeConfig.translationModel;
+
+  if (runtimeConfig.translationProvider === "openai") {
+    return translateWithOpenAi(request, runtimeConfig);
+  }
+
+  if (runtimeConfig.translationProvider === "deepseek") {
+    return translateWithOpenAiCompatible(
+      request,
+      "deepseek",
+      getDeepSeekKey(),
+      runtimeConfig.translationBaseUrl,
+      model
+    );
+  }
+
+  if (runtimeConfig.translationProvider === "custom") {
+    const apiKey = getCustomTranslationKey();
+    if (!apiKey) {
+      throw new Error("请先在 .env 中配置 CUSTOM_TRANSLATION_API_KEY 或 OPENAI_API_KEY。");
+    }
+
+    return translateWithOpenAiCompatible(
+      request,
+      "custom",
+      apiKey,
+      runtimeConfig.translationBaseUrl,
+      model
+    );
+  }
+
+  throw new Error("当前使用本地模拟翻译。");
 }
 
 async function transcribeLocalMediaFileWithOpenAi(
@@ -520,7 +646,7 @@ ipcMain.handle("provider:pull-asr-events", () => pullRealtimeProviderAsrEvents()
 ipcMain.handle("provider:stop-realtime-session", () => stopRealtimeProviderSession());
 
 ipcMain.handle("ai:translate-text", (_event, request: TranslateTextRequest) =>
-  translateWithOpenAi(request)
+  translateWithConfiguredProvider(request)
 );
 
 ipcMain.handle("ai:transcribe-local-media-file", (_event, request: TranscribeLocalMediaFileRequest) =>
