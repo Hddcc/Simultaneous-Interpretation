@@ -72,8 +72,8 @@
 
 ## 10. PR 10 - Final Verification and Archive
 
-- [ ] 10.1 Run build, Electron smoke test, OpenSpec validation, and scenario verification checklist.
-- [ ] 10.2 Confirm no real API keys, local-only files, helper build artifacts, or generated junk files are committed.
-- [ ] 10.3 Confirm `main` is runnable and pushed to the public GitHub repository.
-- [ ] 10.4 Prepare final release or PR note summarizing complete realtime interpretation status and limitations.
-- [ ] 10.5 Archive the OpenSpec change after all tasks and specs are complete.
+- [x] 10.1 Run build, Electron smoke test, OpenSpec validation, and scenario verification checklist.
+- [x] 10.2 Confirm no real API keys, local-only files, helper build artifacts, or generated junk files are committed.
+- [x] 10.3 Confirm `main` is runnable and pushed to the public GitHub repository.
+- [x] 10.4 Prepare final release or PR note summarizing complete realtime interpretation status and limitations.
+- [x] 10.5 Archive the OpenSpec change after all tasks and specs are complete.

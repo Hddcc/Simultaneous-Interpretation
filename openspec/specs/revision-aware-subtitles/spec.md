@@ -1,9 +1,7 @@
 ## Purpose
 
 Define how subtitles are versioned, revised in place, visually indicated, and bounded by a recent revision window.
-
 ## Requirements
-
 ### Requirement: Use versioned subtitle segments
 The system MUST represent each subtitle as a versioned segment with a stable segment identifier, source text, translated text, status, revision number, and timestamps.
 
@@ -12,7 +10,7 @@ The system MUST represent each subtitle as a versioned segment with a stable seg
 - **THEN** the UI stores and renders the subtitle with a stable segment identifier and revision number
 
 ### Requirement: Revise recent subtitles in place
-The system SHALL update an existing subtitle segment in place when ASR or translation output is corrected for that segment.
+The system SHALL update an existing subtitle segment in place when realtime ASR partial/final output or translation output is corrected for that segment.
 
 #### Scenario: ASR correction changes meaning
 - **WHEN** a later ASR event corrects the source text for a recent segment
@@ -21,6 +19,10 @@ The system SHALL update an existing subtitle segment in place when ASR or transl
 #### Scenario: Translation correction improves wording
 - **WHEN** a later translation event improves the translated text for a recent segment
 - **THEN** the system updates the existing segment and increments its revision number
+
+#### Scenario: Provider finalizes a partial segment
+- **WHEN** a realtime provider final event supersedes partial text for the same segment
+- **THEN** the visible subtitle is updated in place and marked as finalized or revised
 
 ### Requirement: Indicate revised content
 The system SHALL provide a subtle UI indication when a visible subtitle has been revised.
@@ -35,3 +37,10 @@ The system MUST only revise recent subtitle segments within a configurable revis
 #### Scenario: Old segment receives late correction
 - **WHEN** a correction arrives for a segment outside the revision window
 - **THEN** the system preserves the existing visible subtitle and records the late correction in session history if supported
+
+### Requirement: Preserve revision provenance
+The system MUST record whether a revision came from ASR partial correction, ASR finalization, translation correction, provider reconnect, or manual fallback.
+
+#### Scenario: Subtitle is revised
+- **WHEN** a subtitle segment receives a newer revision
+- **THEN** session history records the revision source and revision number
