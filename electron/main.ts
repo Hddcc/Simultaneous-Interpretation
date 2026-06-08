@@ -3,6 +3,10 @@ import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { detectNativeSystemAudioCapability } from "./nativeAudioCapability";
 import {
+  buildTranslationContextText,
+  buildTranslationMessages
+} from "./translationPrompt";
+import {
   appendRealtimeProviderAudioChunk,
   getProviderHealth,
   getProviderRuntimeConfig,
@@ -41,15 +45,16 @@ interface FloatingCaptionState {
 }
 
 interface AiRuntimeConfig {
-  provider: "mock" | "openai" | "custom";
+  provider: "mock" | "openai" | "aliyun" | "custom";
   asrMode: "mock" | "provider";
   asrModel: string;
   asrBaseUrl: string;
-  translationProvider: "mock" | "openai" | "deepseek" | "custom";
+  translationProvider: "mock" | "openai" | "deepseek" | "aliyun" | "custom";
   translationModel: string;
   translationBaseUrl: string;
   hasOpenAiKey: boolean;
   hasDeepSeekKey: boolean;
+  hasDashScopeKey: boolean;
   realtimeEnabled: boolean;
   canStartRealtime: boolean;
   missingProviderConfig: string[];
@@ -69,7 +74,7 @@ interface TranslateTextRequest {
 
 interface TranslateTextResponse {
   text: string;
-  provider: "openai" | "deepseek" | "custom";
+  provider: "openai" | "deepseek" | "aliyun" | "custom";
   model: string;
   latencyMs: number;
 }
@@ -155,9 +160,11 @@ function getAiRuntimeConfig(): AiRuntimeConfig {
   const provider =
     providerRuntimeConfig.asrProvider === "openai"
       ? "openai"
-      : providerRuntimeConfig.asrProvider === "custom"
-        ? "custom"
-        : "mock";
+      : providerRuntimeConfig.asrProvider === "aliyun"
+        ? "aliyun"
+        : providerRuntimeConfig.asrProvider === "custom"
+          ? "custom"
+          : "mock";
   const asrMode = provider !== "mock" ? "provider" : "mock";
 
   return {
@@ -170,6 +177,7 @@ function getAiRuntimeConfig(): AiRuntimeConfig {
     translationBaseUrl: providerRuntimeConfig.translationBaseUrl,
     hasOpenAiKey: providerRuntimeConfig.hasOpenAiKey,
     hasDeepSeekKey: providerRuntimeConfig.hasDeepSeekKey,
+    hasDashScopeKey: providerRuntimeConfig.hasDashScopeKey,
     realtimeEnabled: providerRuntimeConfig.realtimeEnabled,
     canStartRealtime: providerRuntimeConfig.canStartRealtime,
     missingProviderConfig: providerRuntimeConfig.missing,
@@ -192,6 +200,16 @@ function getDeepSeekKey(): string {
 
   if (!apiKey) {
     throw new Error("请先在 .env 中配置 DEEPSEEK_API_KEY。");
+  }
+
+  return apiKey;
+}
+
+function getDashScopeKey(): string {
+  const apiKey = process.env.DASHSCOPE_API_KEY;
+
+  if (!apiKey) {
+    throw new Error("请先在 .env 中配置 DASHSCOPE_API_KEY。");
   }
 
   return apiKey;
@@ -232,32 +250,6 @@ function readChatCompletionText(payload: ChatCompletionOutput): string {
 
 function buildProviderEndpoint(baseUrl: string, pathSuffix: string): string {
   return `${baseUrl.replace(/\/+$/, "")}${pathSuffix}`;
-}
-
-function buildTranslationContextText(request: TranslateTextRequest): string {
-  if (!request.context || request.context.length === 0) {
-    return "No previous subtitle context.";
-  }
-
-  return request.context
-    .map((item, index) => `${index + 1}. ${item.sourceText} => ${item.translatedText}`)
-    .join("\n");
-}
-
-function buildTranslationMessages(request: TranslateTextRequest) {
-  const contextText = buildTranslationContextText(request);
-
-  return [
-    {
-      role: "system",
-      content:
-        "You are a realtime conference interpreter. Translate faithfully, keep terminology stable, use recent context for correction, and return only the translated text."
-    },
-    {
-      role: "user",
-      content: `Translate from ${request.sourceLanguage} to ${request.targetLanguage}.\n\nRecent context:\n${contextText}\n\nText:\n${request.text}`
-    }
-  ];
 }
 
 function getMediaMimeType(filePath: string): string {
@@ -325,7 +317,7 @@ async function translateWithOpenAi(
 
 async function translateWithOpenAiCompatible(
   request: TranslateTextRequest,
-  provider: "deepseek" | "custom",
+  provider: "deepseek" | "aliyun" | "custom",
   apiKey: string,
   baseUrl: string,
   model: string
@@ -359,7 +351,12 @@ async function translateWithOpenAiCompatible(
 }
 
 function getCustomTranslationKey(): string {
-  return process.env.CUSTOM_TRANSLATION_API_KEY || process.env.OPENAI_API_KEY || "";
+  return (
+    process.env.CUSTOM_TRANSLATION_API_KEY ||
+    process.env.DASHSCOPE_API_KEY ||
+    process.env.OPENAI_API_KEY ||
+    ""
+  );
 }
 
 async function translateWithConfiguredProvider(
@@ -377,6 +374,16 @@ async function translateWithConfiguredProvider(
       request,
       "deepseek",
       getDeepSeekKey(),
+      runtimeConfig.translationBaseUrl,
+      model
+    );
+  }
+
+  if (runtimeConfig.translationProvider === "aliyun") {
+    return translateWithOpenAiCompatible(
+      request,
+      "aliyun",
+      getDashScopeKey(),
       runtimeConfig.translationBaseUrl,
       model
     );

@@ -1,10 +1,10 @@
-import { randomBytes, createHash } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import net from "node:net";
 import tls from "node:tls";
 
-type RealtimeAsrProvider = "mock" | "openai" | "custom";
-type TranslationProvider = "mock" | "openai" | "deepseek" | "custom";
+type RealtimeAsrProvider = "mock" | "openai" | "aliyun" | "custom";
+type TranslationProvider = "mock" | "openai" | "deepseek" | "aliyun" | "custom";
 type ProviderConnectionState =
   | "idle"
   | "ready"
@@ -36,6 +36,7 @@ export interface ProviderRuntimeConfig {
   translationBaseUrl: string;
   hasOpenAiKey: boolean;
   hasDeepSeekKey: boolean;
+  hasDashScopeKey: boolean;
   realtimeEnabled: boolean;
   canStartRealtime: boolean;
   missing: string[];
@@ -134,6 +135,35 @@ interface OpenAiRealtimeMessage {
   };
 }
 
+interface AliyunRealtimeMessage {
+  header?: {
+    task_id?: string;
+    event?: string;
+    error_code?: string;
+    error_message?: string;
+  };
+  payload?: {
+    output?: {
+      sentence?: {
+        begin_time?: number;
+        end_time?: number;
+        text?: string;
+        heartbeat?: boolean;
+        sentence_end?: boolean;
+        sentence_id?: number;
+      };
+    };
+  };
+}
+
+interface AliyunMappedEvent {
+  event: "task-started" | "task-finished" | "task-failed" | "result-generated";
+  segmentId?: string;
+  text?: string;
+  status?: "partial" | "final";
+  error?: string;
+}
+
 interface SegmentAccumulator {
   id: string;
   text: string;
@@ -158,6 +188,8 @@ let retryAttempts = 0;
 let userStopped = false;
 let pendingAsrEvents: RealtimeProviderAsrEvent[] = [];
 let latestChunk: AppendRealtimeProviderAudioChunkRequest | null = null;
+let aliyunTaskId: string | null = null;
+let aliyunTaskStarted = false;
 const segments = new Map<string, SegmentAccumulator>();
 
 class MinimalRealtimeWebSocket extends EventEmitter {
@@ -217,6 +249,10 @@ class MinimalRealtimeWebSocket extends EventEmitter {
 
   sendJson(payload: unknown): void {
     this.sendFrame(0x1, Buffer.from(JSON.stringify(payload), "utf8"));
+  }
+
+  sendBinary(payload: Buffer): void {
+    this.sendFrame(0x2, payload);
   }
 
   close(): void {
@@ -372,7 +408,7 @@ function readEnv(name: string, fallback = ""): string {
 }
 
 function normalizeAsrProvider(value: string): RealtimeAsrProvider {
-  if (value === "openai" || value === "custom") {
+  if (value === "openai" || value === "aliyun" || value === "custom") {
     return value;
   }
 
@@ -380,7 +416,7 @@ function normalizeAsrProvider(value: string): RealtimeAsrProvider {
 }
 
 function normalizeTranslationProvider(value: string): TranslationProvider {
-  if (value === "openai" || value === "deepseek" || value === "custom") {
+  if (value === "openai" || value === "deepseek" || value === "aliyun" || value === "custom") {
     return value;
   }
 
@@ -409,6 +445,16 @@ function getOpenAiKey(): string {
   return apiKey;
 }
 
+function getDashScopeKey(): string {
+  const apiKey = readEnv("DASHSCOPE_API_KEY");
+
+  if (!apiKey) {
+    throw new Error("缺少本地配置：DASHSCOPE_API_KEY");
+  }
+
+  return apiKey;
+}
+
 function decodePcm16Base64(value: string): Int16Array {
   const bytes = Buffer.from(value, "base64");
   const samples = new Int16Array(bytes.byteLength / 2);
@@ -428,6 +474,35 @@ function encodePcm16Base64(samples: Int16Array): string {
   });
 
   return bytes.toString("base64");
+}
+
+function encodePcm16Buffer(samples: Int16Array): Buffer {
+  const bytes = Buffer.alloc(samples.length * 2);
+
+  samples.forEach((sample, index) => {
+    bytes.writeInt16LE(sample, index * 2);
+  });
+
+  return bytes;
+}
+
+function downmixPcm16(samples: Int16Array, channels: number): Int16Array {
+  if (channels <= 1) {
+    return samples;
+  }
+
+  const frameCount = Math.floor(samples.length / channels);
+  const output = new Int16Array(frameCount);
+
+  for (let frame = 0; frame < frameCount; frame += 1) {
+    let total = 0;
+    for (let channel = 0; channel < channels; channel += 1) {
+      total += samples[frame * channels + channel];
+    }
+    output[frame] = Math.round(total / channels);
+  }
+
+  return output;
 }
 
 function resamplePcm16(samples: Int16Array, sourceRate: number, targetRate: number): Int16Array {
@@ -453,6 +528,12 @@ function resamplePcm16(samples: Int16Array, sourceRate: number, targetRate: numb
 function toOpenAiAudio(payload: RealtimeProviderAudioPayload): string {
   const samples = decodePcm16Base64(payload.data);
   return encodePcm16Base64(resamplePcm16(samples, payload.sampleRate, 24000));
+}
+
+function toAliyunAudio(payload: RealtimeProviderAudioPayload): Buffer {
+  const samples = decodePcm16Base64(payload.data);
+  const mono = downmixPcm16(samples, payload.channels);
+  return encodePcm16Buffer(resamplePcm16(mono, payload.sampleRate, 16000));
 }
 
 function updateSessionState(nextState: Partial<RealtimeProviderSessionState>): void {
@@ -511,6 +592,99 @@ function buildProviderEvent(
   };
 }
 
+export function createAliyunRunTaskMessage(
+  taskId: string,
+  model: string,
+  sourceLanguageCode?: string
+): unknown {
+  const languageCode = sourceLanguageCode?.toLowerCase().startsWith("zh")
+    ? "zh"
+    : sourceLanguageCode?.toLowerCase().startsWith("en")
+      ? "en"
+      : undefined;
+
+  return {
+    header: {
+      action: "run-task",
+      task_id: taskId,
+      streaming: "duplex"
+    },
+    payload: {
+      task_group: "audio",
+      task: "asr",
+      function: "recognition",
+      model,
+      parameters: {
+        format: "pcm",
+        sample_rate: 16000,
+        ...(languageCode ? { language_hints: [languageCode] } : {}),
+        heartbeat: true
+      },
+      input: {}
+    }
+  };
+}
+
+function createAliyunFinishTaskMessage(taskId: string): unknown {
+  return {
+    header: {
+      action: "finish-task",
+      task_id: taskId,
+      streaming: "duplex"
+    },
+    payload: {
+      input: {}
+    }
+  };
+}
+
+export function mapAliyunRealtimeMessage(messageText: string): AliyunMappedEvent | null {
+  let message: AliyunRealtimeMessage;
+
+  try {
+    message = JSON.parse(messageText) as AliyunRealtimeMessage;
+  } catch {
+    return null;
+  }
+
+  const event = message.header?.event;
+
+  if (event === "task-started") {
+    return { event };
+  }
+
+  if (event === "task-finished") {
+    return { event };
+  }
+
+  if (event === "task-failed") {
+    return {
+      event,
+      error:
+        message.header?.error_message ||
+        message.header?.error_code ||
+        "Aliyun realtime ASR task failed."
+    };
+  }
+
+  if (event !== "result-generated") {
+    return null;
+  }
+
+  const sentence = message.payload?.output?.sentence;
+
+  if (!sentence || sentence.heartbeat || !sentence.text?.trim()) {
+    return null;
+  }
+
+  return {
+    event,
+    segmentId: `aliyun-sentence-${sentence.sentence_id ?? message.header?.task_id ?? "live"}`,
+    text: sentence.text.trim(),
+    status: sentence.sentence_end ? "final" : "partial"
+  };
+}
+
 function handleOpenAiMessage(messageText: string): void {
   let message: OpenAiRealtimeMessage;
 
@@ -554,6 +728,44 @@ function handleOpenAiMessage(messageText: string): void {
       state: "error",
       error: message.error?.message || "Realtime ASR 转写失败。"
     });
+  }
+}
+
+function handleAliyunMessage(messageText: string): void {
+  const mapped = mapAliyunRealtimeMessage(messageText);
+
+  if (!mapped) {
+    return;
+  }
+
+  if (mapped.event === "task-started") {
+    aliyunTaskStarted = true;
+    updateSessionState({ state: "streaming", error: null });
+    return;
+  }
+
+  if (mapped.event === "task-finished") {
+    updateSessionState({
+      state: userStopped ? "closed" : "streaming",
+      error: null
+    });
+    return;
+  }
+
+  if (mapped.event === "task-failed") {
+    updateSessionState({
+      state: "error",
+      error: mapped.error || "Aliyun realtime ASR task failed."
+    });
+    return;
+  }
+
+  if (mapped.text && mapped.segmentId && mapped.status) {
+    const event = buildProviderEvent(mapped.segmentId, mapped.text, mapped.status);
+    if (event) {
+      pendingAsrEvents.push(event);
+      updateSessionState({ recentLatencyMs: event.latencyMs, error: null });
+    }
   }
 }
 
@@ -618,6 +830,58 @@ async function connectOpenAiRealtime(config: ProviderRuntimeConfig): Promise<voi
   });
 }
 
+async function connectAliyunRealtime(config: ProviderRuntimeConfig): Promise<void> {
+  websocket?.close();
+  websocket = new MinimalRealtimeWebSocket();
+  aliyunTaskId = randomUUID();
+  aliyunTaskStarted = false;
+
+  websocket.on("message", (messageText: string) => handleAliyunMessage(messageText));
+  websocket.on("error", (error: Error) => {
+    updateSessionState({
+      state: "error",
+      error: error.message || "Aliyun realtime ASR 连接异常。"
+    });
+  });
+  websocket.on("close", () => {
+    if (userStopped || !lastStartRequest || retryAttempts >= 1) {
+      updateSessionState({
+        state: userStopped ? "closed" : "error",
+        sessionId: userStopped ? null : sessionState.sessionId,
+        error: userStopped ? null : "Aliyun realtime ASR 连接已关闭。"
+      });
+      return;
+    }
+
+    retryAttempts += 1;
+    aliyunTaskStarted = false;
+    updateSessionState({ state: "reconnecting", error: "Aliyun realtime ASR 连接中断，正在重试。" });
+    setTimeout(() => {
+      if (lastStartRequest && !userStopped) {
+        void connectAliyunRealtime(config).catch((error) => {
+          updateSessionState({
+            state: "error",
+            error: error instanceof Error ? error.message : "Aliyun realtime ASR 重连失败。"
+          });
+        });
+      }
+    }, 800);
+  });
+
+  await websocket.connect({
+    url: config.asrBaseUrl,
+    headers: {
+      Authorization: `Bearer ${getDashScopeKey()}`,
+      "user-agent": "LinguaBridge/0.1.0"
+    },
+    timeoutMs: 8000
+  });
+
+  websocket.sendJson(
+    createAliyunRunTaskMessage(aliyunTaskId, config.asrModel, lastStartRequest?.sourceLanguageCode)
+  );
+}
+
 export function getProviderRuntimeConfig(): ProviderRuntimeConfig {
   const asrProvider = normalizeAsrProvider(
     readEnv("REALTIME_ASR_PROVIDER", readEnv("VITE_AI_PROVIDER", "mock"))
@@ -627,6 +891,7 @@ export function getProviderRuntimeConfig(): ProviderRuntimeConfig {
   );
   const hasOpenAiKey = Boolean(readEnv("OPENAI_API_KEY"));
   const hasDeepSeekKey = Boolean(readEnv("DEEPSEEK_API_KEY"));
+  const hasDashScopeKey = Boolean(readEnv("DASHSCOPE_API_KEY"));
   const missing: string[] = [];
 
   if (asrProvider === "openai" && !hasOpenAiKey) {
@@ -641,6 +906,10 @@ export function getProviderRuntimeConfig(): ProviderRuntimeConfig {
     missing.push("DEEPSEEK_API_KEY");
   }
 
+  if ((asrProvider === "aliyun" || translationProvider === "aliyun") && !hasDashScopeKey) {
+    missing.push("DASHSCOPE_API_KEY");
+  }
+
   const realtimeEnabled = asrProvider !== "mock";
 
   return {
@@ -648,8 +917,17 @@ export function getProviderRuntimeConfig(): ProviderRuntimeConfig {
     asrModel:
       readEnv("REALTIME_ASR_MODEL") ||
       readEnv("VITE_ASR_MODEL") ||
-      (asrProvider === "openai" ? "gpt-4o-mini-transcribe" : "mock-streaming-asr"),
-    asrBaseUrl: readEnv("REALTIME_ASR_BASE_URL", "https://api.openai.com/v1"),
+      (asrProvider === "openai"
+        ? "gpt-4o-mini-transcribe"
+        : asrProvider === "aliyun"
+          ? "fun-asr-realtime"
+          : "mock-streaming-asr"),
+    asrBaseUrl: readEnv(
+      "REALTIME_ASR_BASE_URL",
+      asrProvider === "aliyun"
+        ? "wss://dashscope.aliyuncs.com/api-ws/v1/inference"
+        : "https://api.openai.com/v1"
+    ),
     translationProvider,
     translationModel:
       readEnv("TRANSLATION_MODEL") ||
@@ -658,12 +936,19 @@ export function getProviderRuntimeConfig(): ProviderRuntimeConfig {
         ? "gpt-4.1-mini"
         : translationProvider === "deepseek"
           ? "deepseek-chat"
-          : "mock-bilingual-translator"),
+          : translationProvider === "aliyun"
+            ? "qwen-plus"
+            : "mock-bilingual-translator"),
     translationBaseUrl:
       readEnv("TRANSLATION_BASE_URL") ||
-      (translationProvider === "deepseek" ? "https://api.deepseek.com" : "https://api.openai.com/v1"),
+      (translationProvider === "deepseek"
+        ? "https://api.deepseek.com"
+        : translationProvider === "aliyun"
+          ? "https://dashscope.aliyuncs.com/compatible-mode/v1"
+          : "https://api.openai.com/v1"),
     hasOpenAiKey,
     hasDeepSeekKey,
+    hasDashScopeKey,
     realtimeEnabled,
     canStartRealtime: !realtimeEnabled || missing.length === 0,
     missing: Array.from(new Set(missing)),
@@ -733,7 +1018,7 @@ export async function startRealtimeProviderSession(
     return getProviderHealth();
   }
 
-  if (config.asrProvider !== "openai") {
+  if (config.asrProvider !== "openai" && config.asrProvider !== "aliyun") {
     sessionState = {
       state: "error",
       sessionId: null,
@@ -765,8 +1050,12 @@ export async function startRealtimeProviderSession(
   };
 
   try {
-    await connectOpenAiRealtime(config);
-    updateSessionState({ state: "streaming", error: null });
+    if (config.asrProvider === "aliyun") {
+      await connectAliyunRealtime(config);
+    } else {
+      await connectOpenAiRealtime(config);
+      updateSessionState({ state: "streaming", error: null });
+    }
   } catch (error) {
     updateSessionState({
       state: "error",
@@ -793,6 +1082,15 @@ export function appendRealtimeProviderAudioChunk(
       type: "input_audio_buffer.append",
       audio: toOpenAiAudio(chunk.payload)
     });
+  }
+
+  if (
+    (sessionState.state === "streaming" || sessionState.state === "degraded") &&
+    websocket &&
+    currentConfig?.asrProvider === "aliyun" &&
+    aliyunTaskStarted
+  ) {
+    websocket.sendBinary(toAliyunAudio(chunk.payload));
   }
 
   return {
@@ -833,8 +1131,13 @@ export function updateRealtimeProviderQueueState(
 export function stopRealtimeProviderSession(): ProviderHealth {
   const config = getProviderRuntimeConfig();
   userStopped = true;
+  if (websocket && currentConfig?.asrProvider === "aliyun" && aliyunTaskId && aliyunTaskStarted) {
+    websocket.sendJson(createAliyunFinishTaskMessage(aliyunTaskId));
+  }
   websocket?.close();
   websocket = null;
+  aliyunTaskId = null;
+  aliyunTaskStarted = false;
   lastStartRequest = null;
   latestChunk = null;
   pendingAsrEvents = [];

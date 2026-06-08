@@ -45,15 +45,16 @@ declare global {
   }
 
   interface AiRuntimeConfig {
-    provider: "mock" | "openai" | "custom";
+    provider: "mock" | "openai" | "aliyun" | "custom";
     asrMode: "mock" | "provider";
     asrModel: string;
     asrBaseUrl: string;
-    translationProvider: "mock" | "openai" | "deepseek" | "custom";
+    translationProvider: "mock" | "openai" | "deepseek" | "aliyun" | "custom";
     translationModel: string;
     translationBaseUrl: string;
     hasOpenAiKey: boolean;
     hasDeepSeekKey: boolean;
+    hasDashScopeKey: boolean;
     realtimeEnabled: boolean;
     canStartRealtime: boolean;
     missingProviderConfig: string[];
@@ -73,7 +74,7 @@ declare global {
 
   interface TranslateTextResponse {
     text: string;
-    provider: "openai" | "deepseek" | "custom";
+    provider: "openai" | "deepseek" | "aliyun" | "custom";
     model: string;
     latencyMs: number;
   }
@@ -127,14 +128,15 @@ declare global {
   }
 
   interface ProviderRuntimeConfig {
-    asrProvider: "mock" | "openai" | "custom";
+    asrProvider: "mock" | "openai" | "aliyun" | "custom";
     asrModel: string;
     asrBaseUrl: string;
-    translationProvider: "mock" | "openai" | "deepseek" | "custom";
+    translationProvider: "mock" | "openai" | "deepseek" | "aliyun" | "custom";
     translationModel: string;
     translationBaseUrl: string;
     hasOpenAiKey: boolean;
     hasDeepSeekKey: boolean;
+    hasDashScopeKey: boolean;
     realtimeEnabled: boolean;
     canStartRealtime: boolean;
     missing: string[];
@@ -147,8 +149,8 @@ declare global {
     sessionId: string | null;
     sourceType: "system" | "microphone" | null;
     languagePairId: string | null;
-    asrProvider: "mock" | "openai" | "custom";
-    translationProvider: "mock" | "openai" | "deepseek" | "custom";
+    asrProvider: "mock" | "openai" | "aliyun" | "custom";
+    translationProvider: "mock" | "openai" | "deepseek" | "aliyun" | "custom";
     queue: RealtimeProviderQueueSnapshot;
     recentLatencyMs: number | null;
     error: string | null;
@@ -203,7 +205,7 @@ declare global {
     revision: number;
     receivedAtMs: number;
     latencyMs: number;
-    provider: "mock" | "openai" | "custom";
+    provider: "mock" | "openai" | "aliyun" | "custom";
     model: string;
   }
 

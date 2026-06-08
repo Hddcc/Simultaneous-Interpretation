@@ -20,6 +20,8 @@
 | 字幕修订测试 | `node .tmp-subtitle-tests/tests/subtitleReconciliation.test.js` | 通过 |
 | 桌面状态测试 | `node .tmp-subtitle-tests/tests/liveExperienceState.test.js` | 通过 |
 | 场景清单测试 | `node .tmp-subtitle-tests/tests/desktopScenarioVerification.test.js` | 通过 |
+| 阿里 provider 配置与事件测试 | `node .tmp-subtitle-tests/tests/aliyunProviderConfig.test.js` | 通过 |
+| Qwen 翻译消息测试 | `node .tmp-subtitle-tests/tests/aliyunTranslationMessages.test.js` | 通过 |
 | Electron 短启动 | hidden-window smoke test | 通过，应用可启动 |
 | `main` 构建 | 切换到 `main` 后运行 `npm.cmd run build` | 通过 |
 
@@ -30,7 +32,7 @@
 | 检查项 | 结果 |
 | --- | --- |
 | 真实 API Key | 未发现真实密钥 |
-| 密钥占位符 | 仅在 `.env.example` 和 `README.md` 出现 `your_openai_api_key`、`your_deepseek_api_key` |
+| 密钥占位符 | 仅在 `.env.example` 和 `README.md` 出现 `your_dashscope_api_key`、`your_openai_api_key`、`your_deepseek_api_key` |
 | 构建产物 | `dist/`、`dist-electron/` 为 ignored，未被 Git 跟踪 |
 | 依赖目录 | `node_modules/` 为 ignored，未被 Git 跟踪 |
 | 测试临时目录 | `.tmp-subtitle-tests/` 为 ignored，未被 Git 跟踪 |
@@ -40,17 +42,15 @@
 密钥扫描命令：
 
 ```bash
-rg -n "sk-[A-Za-z0-9]|OPENAI_API_KEY=sk|DEEPSEEK_API_KEY=sk|DEEPSEEK_API_KEY=your_|OPENAI_API_KEY=your_" . --glob "!.git/**" --glob "!node_modules/**" --glob "!.tmp-subtitle-tests/**" --glob "!dist/**" --glob "!dist-electron/**"
+rg -n "sk-[A-Za-z0-9]|DASHSCOPE_API_KEY=sk|OPENAI_API_KEY=sk|DEEPSEEK_API_KEY=sk|DASHSCOPE_API_KEY=your_|DEEPSEEK_API_KEY=your_|OPENAI_API_KEY=your_" . --glob "!.git/**" --glob "!node_modules/**" --glob "!.tmp-subtitle-tests/**" --glob "!dist/**" --glob "!dist-electron/**"
 ```
 
-命中项均为公开占位符：
+命中项均为公开占位符，集中在 `.env.example`、`README.md` 和本文档的扫描说明中：
 
 ```text
-.env.example:26:# OPENAI_API_KEY=your_openai_api_key
-.env.example:32:# DEEPSEEK_API_KEY=your_deepseek_api_key
-README.md:79:OPENAI_API_KEY=your_openai_api_key
-README.md:93:OPENAI_API_KEY=your_openai_api_key
-README.md:98:DEEPSEEK_API_KEY=your_deepseek_api_key
+DASHSCOPE_API_KEY=your_dashscope_api_key
+OPENAI_API_KEY=your_openai_api_key
+DEEPSEEK_API_KEY=your_deepseek_api_key
 ```
 
 ## 桌面场景状态
@@ -68,7 +68,7 @@ README.md:98:DEEPSEEK_API_KEY=your_deepseek_api_key
 
 ## 最终功能状态
 
-声桥当前具备桌面工作台、系统音频入口、麦克风入口、文件模拟实时输入、中英双向字幕、实时 ASR provider session、OpenAI/DeepSeek-compatible 翻译 provider、字幕修订归并、悬浮字幕、可选译文播报、恢复状态和延迟/队列指标。
+声桥当前具备桌面工作台、系统音频入口、麦克风入口、文件模拟实时输入、中英双向字幕、实时 ASR provider session、Aliyun DashScope `fun-asr-realtime`、Qwen 翻译、OpenAI/DeepSeek-compatible 翻译 provider、字幕修订归并、悬浮字幕、可选译文播报、恢复状态和延迟/队列指标。
 
 Windows 系统音频完整覆盖优先通过 WASAPI loopback helper 能力检测与 Electron `desktopCapturer` fallback 组合完成。不同会议、通话软件对系统音频捕获的限制不同，README 已说明 fallback 与已知限制。
 

@@ -56,13 +56,40 @@ npm start
 
 默认配置使用本地 mock provider，适合先熟悉界面和流程。真实体验需要在本地创建 `.env`，密钥只保存在自己的电脑上：
 
+```bat
+copy .env.example .env
+```
+
+如果你使用 PowerShell，也可以执行：
+
 ```powershell
 Copy-Item .env.example .env
 ```
 
-### 方案一：只用 OpenAI
+### 推荐方案：阿里百炼单 Key
 
-OpenAI 可以承担实时 ASR、文件转写和翻译，是当前最完整的一条配置路径。
+如果你已经在阿里云百炼 / Model Studio 创建了 API Key，推荐先用这一套。一个 `DASHSCOPE_API_KEY` 同时用于 `fun-asr-realtime` 实时语音识别和 Qwen 翻译；模型在请求时通过 `REALTIME_ASR_MODEL` 和 `TRANSLATION_MODEL` 指定。
+
+```dotenv
+VITE_AI_PROVIDER=aliyun
+VITE_ASR_MODE=provider
+
+REALTIME_ASR_PROVIDER=aliyun
+REALTIME_ASR_MODEL=fun-asr-realtime
+REALTIME_ASR_BASE_URL=wss://dashscope.aliyuncs.com/api-ws/v1/inference
+
+TRANSLATION_PROVIDER=aliyun
+TRANSLATION_MODEL=qwen-plus
+TRANSLATION_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+
+DASHSCOPE_API_KEY=your_dashscope_api_key
+```
+
+这条路径适合想用最少配置真实体验同传的用户。请确认百炼账号已开通对应模型、地域和额度。
+
+### 可选方案：只用 OpenAI
+
+OpenAI 可以承担实时 ASR、文件转写和翻译。
 
 ```dotenv
 VITE_AI_PROVIDER=openai
@@ -79,7 +106,7 @@ TRANSLATION_BASE_URL=https://api.openai.com/v1
 OPENAI_API_KEY=your_openai_api_key
 ```
 
-### 方案二：OpenAI ASR + DeepSeek 翻译
+### 可选方案：OpenAI ASR + DeepSeek 翻译
 
 DeepSeek 适合承担文本翻译；音频识别仍需要 OpenAI 或其他 ASR provider。配置方式如下：
 
@@ -169,11 +196,15 @@ TRANSLATION_PROVIDER=mock
 
 ### 启动后提示缺少 API Key
 
-检查 `.env` 是否位于项目根目录，并确认 `OPENAI_API_KEY`、`DEEPSEEK_API_KEY` 等变量已经填写。修改 `.env` 后需要重启应用。
+检查 `.env` 是否位于项目根目录，并确认当前 provider 对应的 Key 已经填写。阿里百炼单 Key 模式需要 `DASHSCOPE_API_KEY`；OpenAI 模式需要 `OPENAI_API_KEY`；DeepSeek 翻译模式需要 `DEEPSEEK_API_KEY`。修改 `.env` 后需要重启应用。
+
+### 可以只用阿里百炼吗？
+
+可以。配置 `REALTIME_ASR_PROVIDER=aliyun` 和 `TRANSLATION_PROVIDER=aliyun` 后，声桥会用 `fun-asr-realtime` 识别音频，再用 Qwen 模型翻译文本。你只需要在本地 `.env` 里填写 `DASHSCOPE_API_KEY`。
 
 ### 可以只用 DeepSeek 吗？
 
-DeepSeek 可以用于文本翻译。实时同传还需要 ASR 把音频转成文字，所以完整路径仍要配置 OpenAI ASR 或接入其他 ASR provider。
+DeepSeek 可以用于文本翻译。实时同传还需要 ASR 把音频转成文字，所以完整路径需要搭配阿里百炼 `fun-asr-realtime`、OpenAI ASR 或其他 ASR provider。
 
 ### 系统音频没有声音或没有字幕
 
@@ -205,8 +236,8 @@ DeepSeek 可以用于文本翻译。实时同传还需要 ASR 把音频转成文
 | 桌面壳 | Electron |
 | 前端界面 | React + TypeScript |
 | 构建工具 | Vite |
-| 实时 ASR | OpenAI Realtime transcription 路径 |
-| 翻译 | OpenAI / DeepSeek-compatible text provider / mock |
+| 实时 ASR | Aliyun DashScope `fun-asr-realtime` / OpenAI Realtime transcription / mock |
+| 翻译 | Aliyun Qwen / OpenAI / DeepSeek-compatible text provider / mock |
 | 系统音频 | Windows WASAPI loopback helper 检测 + Electron desktopCapturer fallback |
 | 语音播报 | Web Speech `speechSynthesis` |
 
@@ -224,7 +255,7 @@ docs/verification/ 真实桌面场景验证说明
 
 ## 依赖与原创实现
 
-第三方依赖主要用于桌面运行、前端渲染、构建和本地开发流程，包括 `electron`、`react`、`react-dom`、`vite`、`typescript`、`concurrently` 和 `wait-on`。AI 服务通过用户本地配置的 OpenAI API、DeepSeek-compatible API 或 mock provider 接入。
+第三方依赖主要用于桌面运行、前端渲染、构建和本地开发流程，包括 `electron`、`react`、`react-dom`、`vite`、`typescript`、`concurrently` 和 `wait-on`。AI 服务通过用户本地配置的 Aliyun DashScope API、OpenAI API、DeepSeek-compatible API 或 mock provider 接入。
 
 本项目原创实现包括：桌面同传工作台、系统音频/麦克风/文件三类输入入口、统一音频块与 provider-ready payload 合约、实时 provider session 状态、字幕修订归并、悬浮字幕窗口、可选译文播报，以及真实桌面场景验证清单。
 

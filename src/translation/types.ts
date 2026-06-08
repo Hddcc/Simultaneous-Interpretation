@@ -41,7 +41,7 @@ export interface TranslationEvent {
   createdAtMs: number;
   latencyMs: number;
   contextSize: number;
-  provider: "mock" | "openai" | "deepseek" | "custom";
+  provider: "mock" | "openai" | "deepseek" | "aliyun" | "custom";
   model: string;
   error: string | null;
   fallback: boolean;
@@ -72,7 +72,7 @@ export interface SubtitleSegment {
   translationLatencyMs: number;
   totalLatencyMs: number;
   contextSize: number;
-  translationProvider: "mock" | "openai" | "deepseek" | "custom";
+  translationProvider: "mock" | "openai" | "deepseek" | "aliyun" | "custom";
   translationModel: string;
   translationError: string | null;
   translationFallback: boolean;

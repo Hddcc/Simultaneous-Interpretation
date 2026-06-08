@@ -32,6 +32,7 @@ function providerHealth(state: ProviderConnectionState, dropped = 0): ProviderHe
       translationBaseUrl: "https://api.openai.com/v1",
       hasOpenAiKey: true,
       hasDeepSeekKey: false,
+      hasDashScopeKey: false,
       realtimeEnabled: true,
       canStartRealtime: true,
       missing: [],
