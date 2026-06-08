@@ -56,11 +56,11 @@
 
 ## 8. PR 8 - Desktop Scenario Verification
 
-- [ ] 8.1 Verify browser video playback can produce live translated captions from system audio without file upload.
-- [ ] 8.2 Verify Tencent Meeting or comparable meeting app audio can be captured or produces a clear documented fallback.
-- [ ] 8.3 Verify WeChat or comparable call-style audio can be captured or produces a clear documented fallback.
-- [ ] 8.4 Verify microphone fallback, floating captions over other apps, and optional translated speech output in live mode.
-- [ ] 8.5 Prepare a PR description focused only on real desktop scenario verification.
+- [x] 8.1 Verify browser video playback can produce live translated captions from system audio without file upload.
+- [x] 8.2 Verify Tencent Meeting or comparable meeting app audio can be captured or produces a clear documented fallback.
+- [x] 8.3 Verify WeChat or comparable call-style audio can be captured or produces a clear documented fallback.
+- [x] 8.4 Verify microphone fallback, floating captions over other apps, and optional translated speech output in live mode.
+- [x] 8.5 Prepare a PR description focused only on real desktop scenario verification.
 
 ## 9. PR 9 - README Product Usage Update
 
