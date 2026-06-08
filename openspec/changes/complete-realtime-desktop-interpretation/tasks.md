@@ -64,11 +64,11 @@
 
 ## 9. PR 9 - README Product Usage Update
 
-- [ ] 9.1 Rewrite README configuration and usage sections in Chinese product-usage style for realtime desktop interpretation.
-- [ ] 9.2 Document required API keys, provider choices, model roles, Windows system audio setup, startup commands, and troubleshooting.
-- [ ] 9.3 Document supported scenarios and known limitations based on verification results, without internal PR/task checklist language.
-- [ ] 9.4 Update dependency and original implementation attribution for the capture helper and provider APIs.
-- [ ] 9.5 Prepare a PR description focused only on README and public usage documentation.
+- [x] 9.1 Rewrite README configuration and usage sections in Chinese product-usage style for realtime desktop interpretation.
+- [x] 9.2 Document required API keys, provider choices, model roles, Windows system audio setup, startup commands, and troubleshooting.
+- [x] 9.3 Document supported scenarios and known limitations based on verification results, without internal PR/task checklist language.
+- [x] 9.4 Update dependency and original implementation attribution for the capture helper and provider APIs.
+- [x] 9.5 Prepare a PR description focused only on README and public usage documentation.
 
 ## 10. PR 10 - Final Verification and Archive
 
