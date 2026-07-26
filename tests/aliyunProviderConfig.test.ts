@@ -23,7 +23,12 @@ assert.equal(aliyunConfig.asrModel, "fun-asr-realtime");
 assert.equal(aliyunConfig.asrBaseUrl, "wss://dashscope.aliyuncs.com/api-ws/v1/inference");
 assert.equal(aliyunConfig.translationProvider, "aliyun");
 assert.equal(aliyunConfig.translationModel, "qwen-plus");
+assert.equal(aliyunConfig.fastDraftModel, "qwen-plus");
+assert.equal(aliyunConfig.fastDraftStreaming, true);
 assert.equal(aliyunConfig.translationBaseUrl, "https://dashscope.aliyuncs.com/compatible-mode/v1");
+assert.equal(aliyunConfig.refinementProvider, "aliyun");
+assert.equal(aliyunConfig.refinementModel, "qwen-plus");
+assert.equal(aliyunConfig.refinementBaseUrl, "https://dashscope.aliyuncs.com/compatible-mode/v1");
 assert.equal(aliyunConfig.hasDashScopeKey, true);
 assert.equal(aliyunConfig.canStartRealtime, true);
 assert.deepEqual(aliyunConfig.missing, []);
@@ -37,6 +42,21 @@ resetEnv({
 const missingConfig = getProviderRuntimeConfig();
 assert.equal(missingConfig.canStartRealtime, false);
 assert.deepEqual(missingConfig.missing, ["DASHSCOPE_API_KEY"]);
+
+resetEnv({
+  REALTIME_ASR_PROVIDER: "mock",
+  TRANSLATION_PROVIDER: "aliyun",
+  REFINEMENT_PROVIDER: "deepseek",
+  REFINEMENT_MODEL: "deepseek-chat",
+  DASHSCOPE_API_KEY: "test-dashscope-key",
+  DEEPSEEK_API_KEY: "test-deepseek-key"
+});
+
+const customRefinementConfig = getProviderRuntimeConfig();
+assert.equal(customRefinementConfig.translationProvider, "aliyun");
+assert.equal(customRefinementConfig.refinementProvider, "deepseek");
+assert.equal(customRefinementConfig.refinementModel, "deepseek-chat");
+assert.deepEqual(customRefinementConfig.missing, []);
 
 const runTask = createAliyunRunTaskMessage("task-1", "fun-asr-realtime", "en-US") as {
   header: { action: string; task_id: string; streaming: string };

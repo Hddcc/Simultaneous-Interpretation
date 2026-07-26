@@ -55,6 +55,32 @@ export function createPcm16PayloadFromTimeDomainSamples(
   };
 }
 
+export function createPcm16PayloadFromFloatSamples(
+  samples: Float32Array,
+  sampleRate = SIMULATED_SAMPLE_RATE,
+  channels = SIMULATED_CHANNELS,
+  durationMs = SIMULATED_CHUNK_DURATION_MS
+): AudioPayload {
+  const pcmBytes = new Uint8Array(samples.length * 2);
+  const view = new DataView(pcmBytes.buffer);
+
+  samples.forEach((sample, index) => {
+    const clamped = Math.max(-1, Math.min(1, sample));
+    view.setInt16(index * 2, Math.round(clamped * 32767), true);
+  });
+
+  return {
+    encoding: "pcm16-base64",
+    sampleFormat: "s16le",
+    sampleRate,
+    channels,
+    frameCount: samples.length,
+    byteLength: pcmBytes.byteLength,
+    durationMs,
+    data: encodeBytesToBase64(pcmBytes)
+  };
+}
+
 function createPayloadMetadata(payload?: AudioPayload): AudioPayloadMetadata {
   if (!payload) {
     return createEmptyPayloadMetadata();

@@ -1,10 +1,13 @@
 import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, screen, session } from "electron";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { detectNativeSystemAudioCapability } from "./nativeAudioCapability";
 import {
+  buildSubtitleRefinementMessages,
   buildTranslationContextText,
-  buildTranslationMessages
+  buildTranslationMessages,
+  isReadableTranslationDraft,
+  parseSubtitleRefinementJson
 } from "./translationPrompt";
 import {
   appendRealtimeProviderAudioChunk,
@@ -13,6 +16,7 @@ import {
   pullRealtimeProviderAsrEvents,
   startRealtimeProviderSession,
   stopRealtimeProviderSession,
+  subscribeRealtimeProviderAsrEvents,
   updateRealtimeProviderQueueState,
   type AppendRealtimeProviderAudioChunkRequest,
   type RealtimeProviderQueueSnapshot,
@@ -21,6 +25,7 @@ import {
 
 const isDev = process.argv.includes("--dev");
 let floatingCaptionWindow: BrowserWindow | null = null;
+let mainWindow: BrowserWindow | null = null;
 let latestFloatingCaptionState: FloatingCaptionState | null = null;
 
 type FloatingCaptionLayout = "compact" | "standard" | "wide";
@@ -34,6 +39,7 @@ interface FloatingCaptionOptions {
 interface FloatingCaptionState {
   translatedText: string;
   sourceText: string;
+  previousText: string | null;
   statusLabel: string;
   compactStatusLabel: string;
   severity: "neutral" | "active" | "warning" | "error";
@@ -41,6 +47,11 @@ interface FloatingCaptionState {
   sessionStatus: string;
   latencyLabel: string;
   revised: boolean;
+  locked: boolean;
+  mousePassthrough: boolean;
+  opacity: number;
+  fontScale: number;
+  controlsVisible: boolean;
   updatedAtMs: number;
 }
 
@@ -51,7 +62,12 @@ interface AiRuntimeConfig {
   asrBaseUrl: string;
   translationProvider: "mock" | "openai" | "deepseek" | "aliyun" | "custom";
   translationModel: string;
+  fastDraftModel: string;
+  fastDraftStreaming: boolean;
   translationBaseUrl: string;
+  refinementProvider: "mock" | "openai" | "deepseek" | "aliyun" | "custom";
+  refinementModel: string;
+  refinementBaseUrl: string;
   hasOpenAiKey: boolean;
   hasDeepSeekKey: boolean;
   hasDashScopeKey: boolean;
@@ -62,6 +78,10 @@ interface AiRuntimeConfig {
 }
 
 interface TranslateTextRequest {
+  requestId?: string;
+  stream?: boolean;
+  fastDraft?: boolean;
+  minimumReadableCharacters?: number;
   text: string;
   sourceLanguage: string;
   targetLanguage: string;
@@ -74,6 +94,34 @@ interface TranslateTextRequest {
 
 interface TranslateTextResponse {
   text: string;
+  provider: "openai" | "deepseek" | "aliyun" | "custom";
+  model: string;
+  latencyMs: number;
+}
+
+interface TranslationDraftResponse extends TranslateTextResponse {
+  requestId: string;
+  receivedAtMs: number;
+  complete: boolean;
+}
+
+interface RefineSubtitleRequest {
+  sourceText: string;
+  translatedText: string;
+  sourceLanguage: string;
+  targetLanguage: string;
+  model?: string;
+  context?: Array<{
+    sourceText: string;
+    translatedText: string;
+  }>;
+  terminologyHints?: string[];
+}
+
+interface RefineSubtitleResponse {
+  refinedSourceText: string;
+  refinedTranslatedText: string;
+  reason: string;
   provider: "openai" | "deepseek" | "aliyun" | "custom";
   model: string;
   latencyMs: number;
@@ -108,6 +156,9 @@ interface OpenAiResponseOutput {
 
 interface ChatCompletionOutput {
   choices?: Array<{
+    delta?: {
+      content?: string;
+    };
     message?: {
       content?: string;
     };
@@ -122,6 +173,8 @@ const defaultFloatingOptions: FloatingCaptionOptions = {
   layout: "standard",
   position: "bottom-right"
 };
+
+let latestFloatingOptions: FloatingCaptionOptions = defaultFloatingOptions;
 
 async function loadLocalEnv(): Promise<void> {
   const envPath = path.join(process.cwd(), ".env");
@@ -174,7 +227,12 @@ function getAiRuntimeConfig(): AiRuntimeConfig {
     asrBaseUrl: providerRuntimeConfig.asrBaseUrl,
     translationProvider: providerRuntimeConfig.translationProvider,
     translationModel: providerRuntimeConfig.translationModel,
+    fastDraftModel: providerRuntimeConfig.fastDraftModel,
+    fastDraftStreaming: providerRuntimeConfig.fastDraftStreaming,
     translationBaseUrl: providerRuntimeConfig.translationBaseUrl,
+    refinementProvider: providerRuntimeConfig.refinementProvider,
+    refinementModel: providerRuntimeConfig.refinementModel,
+    refinementBaseUrl: providerRuntimeConfig.refinementBaseUrl,
     hasOpenAiKey: providerRuntimeConfig.hasOpenAiKey,
     hasDeepSeekKey: providerRuntimeConfig.hasDeepSeekKey,
     hasDashScopeKey: providerRuntimeConfig.hasDashScopeKey,
@@ -284,7 +342,8 @@ function normalizeOpenAiLanguage(languageCode: string): string {
 
 async function translateWithOpenAi(
   request: TranslateTextRequest,
-  runtimeConfig = getAiRuntimeConfig()
+  runtimeConfig = getAiRuntimeConfig(),
+  signal?: AbortSignal
 ): Promise<TranslateTextResponse> {
   const startedAtMs = Date.now();
   const model = request.model || runtimeConfig.translationModel;
@@ -295,6 +354,7 @@ async function translateWithOpenAi(
       Authorization: `Bearer ${getOpenAiKey()}`,
       "Content-Type": "application/json"
     },
+    signal,
     body: JSON.stringify({
       model,
       input: buildTranslationMessages(request)
@@ -315,12 +375,86 @@ async function translateWithOpenAi(
   };
 }
 
+async function readCompatibleTranslationStream(
+  response: Response,
+  request: TranslateTextRequest,
+  provider: "deepseek" | "aliyun" | "custom",
+  model: string,
+  startedAtMs: number,
+  onDraft?: (draft: TranslationDraftResponse) => void
+): Promise<TranslateTextResponse> {
+  if (!response.body) {
+    throw new Error("翻译服务未返回可读流。");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let translatedText = "";
+  let lastPublishedText = "";
+  const minimumCharacters = request.minimumReadableCharacters ?? 6;
+
+  const consumeLine = (line: string) => {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("data:") || trimmed === "data: [DONE]") {
+      return;
+    }
+    try {
+      const payload = JSON.parse(trimmed.slice(5).trim()) as ChatCompletionOutput;
+      translatedText += payload.choices?.[0]?.delta?.content ?? "";
+      if (
+        translatedText !== lastPublishedText &&
+        isReadableTranslationDraft(translatedText, minimumCharacters)
+      ) {
+        lastPublishedText = translatedText;
+        onDraft?.({
+          requestId: request.requestId ?? "",
+          text: translatedText,
+          provider,
+          model,
+          latencyMs: Date.now() - startedAtMs,
+          receivedAtMs: Date.now(),
+          complete: false
+        });
+      }
+    } catch {
+      // Ignore provider keepalive or malformed non-content chunks.
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value, { stream: !done });
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() ?? "";
+    lines.forEach(consumeLine);
+    if (done) {
+      break;
+    }
+  }
+  if (buffer) {
+    consumeLine(buffer);
+  }
+  if (!translatedText.trim()) {
+    throw new Error("流式翻译结果为空。");
+  }
+
+  return {
+    text: translatedText.trim(),
+    provider,
+    model,
+    latencyMs: Date.now() - startedAtMs
+  };
+}
+
 async function translateWithOpenAiCompatible(
   request: TranslateTextRequest,
   provider: "deepseek" | "aliyun" | "custom",
   apiKey: string,
   baseUrl: string,
-  model: string
+  model: string,
+  signal?: AbortSignal,
+  onDraft?: (draft: TranslationDraftResponse) => void
 ): Promise<TranslateTextResponse> {
   const startedAtMs = Date.now();
   const response = await fetch(buildProviderEndpoint(baseUrl, "/chat/completions"), {
@@ -329,12 +463,22 @@ async function translateWithOpenAiCompatible(
       Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json"
     },
+    signal,
     body: JSON.stringify({
       model,
       messages: buildTranslationMessages(request),
-      temperature: 0.2
+      temperature: 0.1,
+      stream: Boolean(request.stream)
     })
   });
+
+  if (
+    request.stream &&
+    response.ok &&
+    response.headers.get("content-type")?.includes("text/event-stream")
+  ) {
+    return readCompatibleTranslationStream(response, request, provider, model, startedAtMs, onDraft);
+  }
 
   const payload = (await response.json()) as ChatCompletionOutput & OpenAiErrorResponse;
 
@@ -360,13 +504,15 @@ function getCustomTranslationKey(): string {
 }
 
 async function translateWithConfiguredProvider(
-  request: TranslateTextRequest
+  request: TranslateTextRequest,
+  signal?: AbortSignal,
+  onDraft?: (draft: TranslationDraftResponse) => void
 ): Promise<TranslateTextResponse> {
   const runtimeConfig = getAiRuntimeConfig();
   const model = request.model || runtimeConfig.translationModel;
 
   if (runtimeConfig.translationProvider === "openai") {
-    return translateWithOpenAi(request, runtimeConfig);
+    return translateWithOpenAi(request, runtimeConfig, signal);
   }
 
   if (runtimeConfig.translationProvider === "deepseek") {
@@ -375,7 +521,9 @@ async function translateWithConfiguredProvider(
       "deepseek",
       getDeepSeekKey(),
       runtimeConfig.translationBaseUrl,
-      model
+      model,
+      signal,
+      onDraft
     );
   }
 
@@ -385,7 +533,9 @@ async function translateWithConfiguredProvider(
       "aliyun",
       getDashScopeKey(),
       runtimeConfig.translationBaseUrl,
-      model
+      model,
+      signal,
+      onDraft
     );
   }
 
@@ -400,7 +550,9 @@ async function translateWithConfiguredProvider(
       "custom",
       apiKey,
       runtimeConfig.translationBaseUrl,
-      model
+      model,
+      signal,
+      onDraft
     );
   }
 
@@ -474,6 +626,136 @@ function getFloatingWindowBounds(options: FloatingCaptionOptions): Electron.Rect
   };
 }
 
+async function refineWithOpenAi(
+  request: RefineSubtitleRequest,
+  runtimeConfig = getAiRuntimeConfig()
+): Promise<RefineSubtitleResponse> {
+  const startedAtMs = Date.now();
+  const model = request.model || runtimeConfig.refinementModel;
+
+  const response = await fetch(buildProviderEndpoint(runtimeConfig.refinementBaseUrl, "/responses"), {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${getOpenAiKey()}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model,
+      input: buildSubtitleRefinementMessages(request)
+    })
+  });
+
+  const payload = (await response.json()) as OpenAiResponseOutput & OpenAiErrorResponse;
+
+  if (!response.ok) {
+    throw new Error(readOpenAiError(payload));
+  }
+
+  return {
+    ...parseSubtitleRefinementJson(readOpenAiOutputText(payload)),
+    provider: "openai",
+    model,
+    latencyMs: Date.now() - startedAtMs
+  };
+}
+
+async function refineWithOpenAiCompatible(
+  request: RefineSubtitleRequest,
+  provider: "deepseek" | "aliyun" | "custom",
+  apiKey: string,
+  baseUrl: string,
+  model: string
+): Promise<RefineSubtitleResponse> {
+  const startedAtMs = Date.now();
+  const response = await fetch(buildProviderEndpoint(baseUrl, "/chat/completions"), {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model,
+      messages: buildSubtitleRefinementMessages(request),
+      temperature: 0.15
+    })
+  });
+
+  const payload = (await response.json()) as ChatCompletionOutput & OpenAiErrorResponse;
+
+  if (!response.ok) {
+    throw new Error(readOpenAiError(payload));
+  }
+
+  return {
+    ...parseSubtitleRefinementJson(readChatCompletionText(payload)),
+    provider,
+    model,
+    latencyMs: Date.now() - startedAtMs
+  };
+}
+
+async function refineWithConfiguredProvider(
+  request: RefineSubtitleRequest
+): Promise<RefineSubtitleResponse> {
+  const runtimeConfig = getAiRuntimeConfig();
+  const model = request.model || runtimeConfig.refinementModel;
+
+  if (runtimeConfig.refinementProvider === "openai") {
+    return refineWithOpenAi(request, runtimeConfig);
+  }
+
+  if (runtimeConfig.refinementProvider === "deepseek") {
+    return refineWithOpenAiCompatible(
+      request,
+      "deepseek",
+      getDeepSeekKey(),
+      runtimeConfig.refinementBaseUrl,
+      model
+    );
+  }
+
+  if (runtimeConfig.refinementProvider === "aliyun") {
+    return refineWithOpenAiCompatible(
+      request,
+      "aliyun",
+      getDashScopeKey(),
+      runtimeConfig.refinementBaseUrl,
+      model
+    );
+  }
+
+  if (runtimeConfig.refinementProvider === "custom") {
+    const apiKey = getCustomTranslationKey();
+
+    if (!apiKey) {
+      throw new Error("请先在 .env 中配置 CUSTOM_TRANSLATION_API_KEY 或可复用的文本 provider Key。");
+    }
+
+    return refineWithOpenAiCompatible(
+      request,
+      "custom",
+      apiKey,
+      runtimeConfig.refinementBaseUrl,
+      model
+    );
+  }
+
+  throw new Error("当前润色 provider 未启用。");
+}
+
+function setFloatingCaptionInteraction(options: {
+  locked: boolean;
+  mousePassthrough: boolean;
+}): void {
+  if (!floatingCaptionWindow || floatingCaptionWindow.isDestroyed()) {
+    return;
+  }
+
+  floatingCaptionWindow.setIgnoreMouseEvents(options.locked && options.mousePassthrough, {
+    forward: true
+  });
+}
+
 function loadFloatingCaptionWindow(window: BrowserWindow): void {
   if (isDev) {
     void window.loadURL("http://127.0.0.1:5173?window=floating");
@@ -495,11 +777,11 @@ function sendFloatingCaptionState(): void {
 
 function createMainWindow(): void {
   const window = new BrowserWindow({
-    width: 1120,
-    height: 720,
-    minWidth: 960,
-    minHeight: 600,
-    title: "声桥 LinguaBridge",
+    width: 820,
+    height: 520,
+    minWidth: 680,
+    minHeight: 420,
+    title: "同声传译",
     backgroundColor: "#0f172a",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
@@ -507,10 +789,16 @@ function createMainWindow(): void {
       nodeIntegration: false
     }
   });
+  window.setMenu(null);
+  mainWindow = window;
+  window.on("closed", () => {
+    if (mainWindow === window) {
+      mainWindow = null;
+    }
+  });
 
   if (isDev) {
     void window.loadURL("http://127.0.0.1:5173");
-    window.webContents.openDevTools({ mode: "detach" });
     return;
   }
 
@@ -518,8 +806,9 @@ function createMainWindow(): void {
 }
 
 function createFloatingCaptionWindow(options = defaultFloatingOptions): BrowserWindow {
+  latestFloatingOptions = options;
+
   if (floatingCaptionWindow && !floatingCaptionWindow.isDestroyed()) {
-    floatingCaptionWindow.setBounds(getFloatingWindowBounds(options), true);
     floatingCaptionWindow.show();
     floatingCaptionWindow.focus();
     sendFloatingCaptionState();
@@ -551,6 +840,8 @@ function createFloatingCaptionWindow(options = defaultFloatingOptions): BrowserW
   });
   floatingCaptionWindow.webContents.on("did-finish-load", sendFloatingCaptionState);
   loadFloatingCaptionWindow(floatingCaptionWindow);
+  floatingCaptionWindow.on("moved", () => sendFloatingCaptionState());
+  floatingCaptionWindow.on("resized", () => sendFloatingCaptionState());
 
   return floatingCaptionWindow;
 }
@@ -590,11 +881,41 @@ ipcMain.handle("desktop:list-audio-sources", async () => {
     fetchWindowIcons: false
   });
 
-  return sources.map((source) => ({
-    id: source.id,
-    name: source.name
-  }));
+  return sources
+    .map((source) => ({
+      id: source.id,
+      name: source.name
+    }))
+    .sort((left, right) => {
+      const leftIsScreen = left.id.startsWith("screen:");
+      const rightIsScreen = right.id.startsWith("screen:");
+
+      if (leftIsScreen === rightIsScreen) {
+        return left.name.localeCompare(right.name, "zh-CN");
+      }
+
+      return leftIsScreen ? -1 : 1;
+    });
 });
+
+ipcMain.handle(
+  "dialog:export-subtitle-history",
+  async (_event, content: string, suggestedName: string) => {
+    if (typeof content !== "string" || typeof suggestedName !== "string") {
+      throw new Error("Invalid subtitle history export request.");
+    }
+
+    const result = await dialog.showSaveDialog({
+      title: "导出字幕历史",
+      defaultPath: suggestedName,
+      filters: [{ name: "Text", extensions: ["txt"] }]
+    });
+    if (result.canceled || !result.filePath) return false;
+
+    await writeFile(result.filePath, content, "utf8");
+    return true;
+  }
+);
 
 ipcMain.handle("native-audio:get-system-capture-capability", () =>
   detectNativeSystemAudioCapability()
@@ -617,6 +938,7 @@ ipcMain.handle("floating-caption:close", () => {
 });
 
 ipcMain.handle("floating-caption:configure", (_event, options: FloatingCaptionOptions) => {
+  latestFloatingOptions = options;
   const window = createFloatingCaptionWindow(options);
   window.setBounds(getFloatingWindowBounds(options), true);
   return {
@@ -625,8 +947,33 @@ ipcMain.handle("floating-caption:configure", (_event, options: FloatingCaptionOp
   };
 });
 
+ipcMain.handle(
+  "floating-caption:set-interaction",
+  (_event, options: { locked: boolean; mousePassthrough: boolean }) => {
+    setFloatingCaptionInteraction(options);
+    return {
+      visible: Boolean(floatingCaptionWindow && !floatingCaptionWindow.isDestroyed()),
+      bounds: floatingCaptionWindow?.isDestroyed() ? undefined : floatingCaptionWindow?.getBounds()
+    };
+  }
+);
+
+ipcMain.handle("floating-caption:reset", () => {
+  const window = createFloatingCaptionWindow(latestFloatingOptions);
+  window.setBounds(getFloatingWindowBounds(latestFloatingOptions), true);
+  window.setIgnoreMouseEvents(false);
+  return {
+    visible: true,
+    bounds: window.getBounds()
+  };
+});
+
 ipcMain.on("floating-caption:update", (_event, state: FloatingCaptionState) => {
   latestFloatingCaptionState = state;
+  setFloatingCaptionInteraction({
+    locked: state.locked,
+    mousePassthrough: state.mousePassthrough
+  });
   sendFloatingCaptionState();
 });
 
@@ -652,10 +999,56 @@ ipcMain.handle(
 
 ipcMain.handle("provider:pull-asr-events", () => pullRealtimeProviderAsrEvents());
 
+subscribeRealtimeProviderAsrEvents((event) => {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+  mainWindow.webContents.send("provider:asr-event", event);
+});
+
 ipcMain.handle("provider:stop-realtime-session", () => stopRealtimeProviderSession());
 
-ipcMain.handle("ai:translate-text", (_event, request: TranslateTextRequest) =>
-  translateWithConfiguredProvider(request)
+const translationControllers = new Map<string, AbortController>();
+
+ipcMain.handle("ai:translate-text", async (ipcEvent, request: TranslateTextRequest) => {
+  const controller = new AbortController();
+  const startedAtMs = Date.now();
+  if (request.requestId) {
+    translationControllers.set(request.requestId, controller);
+  }
+  try {
+    return await translateWithConfiguredProvider(request, controller.signal, (draft) => {
+      if (!ipcEvent.sender.isDestroyed()) {
+        ipcEvent.sender.send("ai:translation-draft", draft);
+      }
+    });
+  } catch (error) {
+    if (controller.signal.aborted) {
+      const runtimeConfig = getAiRuntimeConfig();
+      return {
+        text: request.text,
+        provider:
+          runtimeConfig.translationProvider === "mock"
+            ? "custom"
+            : runtimeConfig.translationProvider,
+        model: request.model || runtimeConfig.translationModel,
+        latencyMs: Date.now() - startedAtMs
+      } satisfies TranslateTextResponse;
+    }
+    throw error;
+  } finally {
+    if (request.requestId) {
+      translationControllers.delete(request.requestId);
+    }
+  }
+});
+
+ipcMain.on("ai:cancel-translation", (_event, requestId: string) => {
+  translationControllers.get(requestId)?.abort();
+});
+
+ipcMain.handle("ai:refine-subtitle", (_event, request: RefineSubtitleRequest) =>
+  refineWithConfiguredProvider(request)
 );
 
 ipcMain.handle("ai:transcribe-local-media-file", (_event, request: TranscribeLocalMediaFileRequest) =>

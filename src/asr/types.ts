@@ -12,7 +12,15 @@ export interface AsrConfig {
 
 export type AsrEventStatus = "partial" | "final";
 
-export interface AsrEvent {
+export type AsrTimingCorrelation = "provider-offset" | "segment-revision" | "missing";
+
+export interface AsrTimingMetadata {
+  audioEvidenceEndAtMs: number | null;
+  asrReceivedAtMs: number;
+  timingCorrelation: AsrTimingCorrelation;
+}
+
+export interface AsrEvent extends AsrTimingMetadata {
   id: string;
   segmentId: string;
   chunkId: string;
@@ -27,7 +35,7 @@ export interface AsrEvent {
   latencyMs: number;
 }
 
-export interface AsrSegment {
+export interface AsrSegment extends AsrTimingMetadata {
   id: string;
   sourceType: AudioSourceType;
   text: string;

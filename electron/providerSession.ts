@@ -33,7 +33,12 @@ export interface ProviderRuntimeConfig {
   asrBaseUrl: string;
   translationProvider: TranslationProvider;
   translationModel: string;
+  fastDraftModel: string;
+  fastDraftStreaming: boolean;
   translationBaseUrl: string;
+  refinementProvider: TranslationProvider;
+  refinementModel: string;
+  refinementBaseUrl: string;
   hasOpenAiKey: boolean;
   hasDeepSeekKey: boolean;
   hasDashScopeKey: boolean;
@@ -60,6 +65,10 @@ export interface RealtimeProviderSessionState {
   asrProvider: RealtimeAsrProvider;
   translationProvider: TranslationProvider;
   queue: RealtimeProviderQueueSnapshot;
+  timing: {
+    correlatedEvents: number;
+    uncorrelatedEvents: number;
+  };
   recentLatencyMs: number | null;
   error: string | null;
   startedAtMs: number | null;
@@ -94,6 +103,7 @@ export interface AppendRealtimeProviderAudioChunkRequest {
   sourceType: "system" | "microphone";
   sequence: number;
   timestampMs: number;
+  capturedAtMs?: number;
   durationMs: number;
   volume: number;
   queue: RealtimeProviderQueueSnapshot;
@@ -112,6 +122,9 @@ export interface RealtimeProviderAsrEvent {
   status: "partial" | "final";
   revision: number;
   receivedAtMs: number;
+  audioEvidenceEndAtMs: number | null;
+  asrReceivedAtMs: number;
+  timingCorrelation: "provider-offset" | "segment-revision" | "missing";
   latencyMs: number;
   provider: RealtimeAsrProvider;
   model: string;
@@ -161,6 +174,8 @@ interface AliyunMappedEvent {
   segmentId?: string;
   text?: string;
   status?: "partial" | "final";
+  audioStartMs?: number;
+  audioEndMs?: number;
   error?: string;
 }
 
@@ -168,9 +183,13 @@ interface SegmentAccumulator {
   id: string;
   text: string;
   revision: number;
-  firstChunk: AppendRealtimeProviderAudioChunkRequest;
-  latestChunk: AppendRealtimeProviderAudioChunkRequest;
+  firstChunk: AppendRealtimeProviderAudioChunkRequest | null;
+  latestChunk: AppendRealtimeProviderAudioChunkRequest | null;
+  latestStatus: "partial" | "final";
+  finalizeTimer: NodeJS.Timeout | null;
 }
+
+const ALIYUN_PARTIAL_FINALIZE_DELAY_MS = 1600;
 
 const defaultQueue: RealtimeProviderQueueSnapshot = {
   depth: 0,
@@ -187,16 +206,28 @@ let currentConfig: ProviderRuntimeConfig | null = null;
 let retryAttempts = 0;
 let userStopped = false;
 let pendingAsrEvents: RealtimeProviderAsrEvent[] = [];
-let latestChunk: AppendRealtimeProviderAudioChunkRequest | null = null;
+let audioEvidenceChunks: AppendRealtimeProviderAudioChunkRequest[] = [];
 let aliyunTaskId: string | null = null;
 let aliyunTaskStarted = false;
 const segments = new Map<string, SegmentAccumulator>();
+const AUDIO_EVIDENCE_BUFFER_LIMIT = 96;
+const providerAsrEvents = new EventEmitter();
 
-class MinimalRealtimeWebSocket extends EventEmitter {
+function clearSegmentFinalizeTimers(): void {
+  segments.forEach((segment) => {
+    if (segment.finalizeTimer) {
+      clearTimeout(segment.finalizeTimer);
+    }
+  });
+}
+
+export class MinimalRealtimeWebSocket extends EventEmitter {
   private socket: net.Socket | tls.TLSSocket | null = null;
   private connected = false;
   private handshakeBuffer = Buffer.alloc(0);
   private frameBuffer = Buffer.alloc(0);
+  private fragmentedOpcode: number | null = null;
+  private fragmentedPayloads: Buffer[] = [];
   private readonly key = randomBytes(16).toString("base64");
 
   async connect(options: RealtimeWebSocketOptions): Promise<void> {
@@ -239,7 +270,10 @@ class MinimalRealtimeWebSocket extends EventEmitter {
       this.socket.once("error", handleError);
       this.socket.on("data", (chunk) => this.handleData(chunk, resolve, reject, timeout));
       this.socket.on("close", () => {
-        if (this.connected) {
+        const shouldNotify = this.connected;
+        this.connected = false;
+        this.socket = null;
+        if (shouldNotify) {
           this.emit("close");
         }
       });
@@ -309,6 +343,7 @@ class MinimalRealtimeWebSocket extends EventEmitter {
 
   private readFrames(): void {
     while (this.frameBuffer.length >= 2) {
+      const final = Boolean(this.frameBuffer[0] & 0x80);
       const opcode = this.frameBuffer[0] & 0x0f;
       const masked = Boolean(this.frameBuffer[1] & 0x80);
       let offset = 2;
@@ -347,10 +382,29 @@ class MinimalRealtimeWebSocket extends EventEmitter {
 
       this.frameBuffer = this.frameBuffer.slice(offset + maskLength + payloadLength);
 
-      if (opcode === 0x1) {
-        this.emit("message", payload.toString("utf8"));
+      if (opcode === 0x1 || opcode === 0x2) {
+        if (final) {
+          if (opcode === 0x1) {
+            this.emit("message", payload.toString("utf8"));
+          }
+        } else {
+          this.fragmentedOpcode = opcode;
+          this.fragmentedPayloads = [payload];
+        }
+      } else if (opcode === 0x0 && this.fragmentedOpcode !== null) {
+        this.fragmentedPayloads.push(payload);
+        if (final) {
+          const completePayload = Buffer.concat(this.fragmentedPayloads);
+          if (this.fragmentedOpcode === 0x1) {
+            this.emit("message", completePayload.toString("utf8"));
+          }
+          this.fragmentedOpcode = null;
+          this.fragmentedPayloads = [];
+        }
       } else if (opcode === 0x8) {
-        this.close();
+        this.sendFrame(0x8, payload);
+        this.socket?.end();
+        this.socket?.destroy();
       } else if (opcode === 0x9) {
         this.sendFrame(0xA, payload);
       }
@@ -396,6 +450,10 @@ function createIdleSessionState(): RealtimeProviderSessionState {
     asrProvider: config.asrProvider,
     translationProvider: config.translationProvider,
     queue: defaultQueue,
+    timing: {
+      correlatedEvents: 0,
+      uncorrelatedEvents: 0
+    },
     recentLatencyMs: null,
     error: null,
     startedAtMs: null,
@@ -405,6 +463,14 @@ function createIdleSessionState(): RealtimeProviderSessionState {
 
 function readEnv(name: string, fallback = ""): string {
   return (process.env[name] || fallback).trim();
+}
+
+function readBooleanEnv(name: string, fallback: boolean): boolean {
+  const value = readEnv(name).toLowerCase();
+  if (!value) {
+    return fallback;
+  }
+  return value === "1" || value === "true" || value === "yes" || value === "on";
 }
 
 function normalizeAsrProvider(value: string): RealtimeAsrProvider {
@@ -548,48 +614,160 @@ function buildSegmentId(message: OpenAiRealtimeMessage): string {
   return message.item_id || message.item?.id || "provider-live-segment";
 }
 
+export function selectAudioEvidenceChunk(
+  chunks: AppendRealtimeProviderAudioChunkRequest[],
+  providerAudioEndMs?: number
+): AppendRealtimeProviderAudioChunkRequest | null {
+  if (chunks.length === 0) {
+    return null;
+  }
+
+  if (Number.isFinite(providerAudioEndMs)) {
+    const endMs = providerAudioEndMs as number;
+    const containing = chunks.find(
+      (chunk) => chunk.timestampMs <= endMs && chunk.timestampMs + chunk.durationMs >= endMs
+    );
+    if (containing) {
+      return containing;
+    }
+
+    const preceding = chunks.filter((chunk) => chunk.timestampMs + chunk.durationMs <= endMs).at(-1);
+    if (preceding) {
+      return preceding;
+    }
+  }
+
+  return chunks.at(-1) ?? null;
+}
+
 function buildProviderEvent(
   segmentId: string,
   text: string,
-  status: "partial" | "final"
+  status: "partial" | "final",
+  providerAudioStartMs?: number,
+  providerAudioEndMs?: number
 ): RealtimeProviderAsrEvent | null {
-  if (!latestChunk || !currentConfig || !sessionState.sessionId) {
+  if (!currentConfig || !sessionState.sessionId) {
     return null;
   }
 
   const existing = segments.get(segmentId);
+  const evidenceChunk = selectAudioEvidenceChunk(audioEvidenceChunks, providerAudioEndMs);
   const accumulator: SegmentAccumulator =
     existing ??
     {
       id: segmentId,
       text: "",
       revision: 0,
-      firstChunk: latestChunk,
-      latestChunk
+      firstChunk: evidenceChunk,
+      latestChunk: evidenceChunk,
+      latestStatus: "partial",
+      finalizeTimer: null
     };
 
   accumulator.text = text;
   accumulator.revision += 1;
-  accumulator.latestChunk = latestChunk;
+  accumulator.firstChunk ??= evidenceChunk;
+  accumulator.latestChunk = evidenceChunk ?? accumulator.latestChunk;
+  accumulator.latestStatus = status;
   segments.set(segmentId, accumulator);
 
   const receivedAtMs = Date.now();
+  const audioEvidenceEndAtMs = accumulator.latestChunk?.capturedAtMs ?? null;
+  const correlated = audioEvidenceEndAtMs !== null;
+  const sourceType = accumulator.latestChunk?.sourceType ?? sessionState.sourceType;
+
+  if (!sourceType) {
+    return null;
+  }
+
   return {
     id: `${segmentId}-${status}-${accumulator.revision}`,
     segmentId,
-    chunkId: latestChunk.id,
-    sourceType: latestChunk.sourceType,
-    sequence: latestChunk.sequence,
-    audioStartMs: accumulator.firstChunk.timestampMs,
-    audioEndMs: latestChunk.timestampMs + latestChunk.durationMs,
+    chunkId: accumulator.latestChunk?.id ?? `uncorrelated-${segmentId}-${accumulator.revision}`,
+    sourceType,
+    sequence: accumulator.latestChunk?.sequence ?? -1,
+    audioStartMs: providerAudioStartMs ?? accumulator.firstChunk?.timestampMs ?? 0,
+    audioEndMs:
+      providerAudioEndMs ??
+      (accumulator.latestChunk
+        ? accumulator.latestChunk.timestampMs + accumulator.latestChunk.durationMs
+        : 0),
     text,
     status,
     revision: accumulator.revision,
     receivedAtMs,
-    latencyMs: Math.max(0, receivedAtMs - latestChunk.timestampMs),
+    audioEvidenceEndAtMs,
+    asrReceivedAtMs: receivedAtMs,
+    timingCorrelation: correlated
+      ? Number.isFinite(providerAudioEndMs)
+        ? "provider-offset"
+        : "segment-revision"
+      : "missing",
+    latencyMs: correlated ? Math.max(0, receivedAtMs - audioEvidenceEndAtMs) : 0,
     provider: currentConfig.asrProvider,
     model: currentConfig.asrModel
   };
+}
+
+export function bufferRealtimeProviderAsrEvent(event: RealtimeProviderAsrEvent): void {
+  pendingAsrEvents.push(event);
+  providerAsrEvents.emit("event", event);
+  updateSessionState({
+    recentLatencyMs: event.audioEvidenceEndAtMs === null ? sessionState.recentLatencyMs : event.latencyMs,
+    timing: {
+      correlatedEvents:
+        sessionState.timing.correlatedEvents + (event.audioEvidenceEndAtMs === null ? 0 : 1),
+      uncorrelatedEvents:
+        sessionState.timing.uncorrelatedEvents + (event.audioEvidenceEndAtMs === null ? 1 : 0)
+    },
+    error: null
+  });
+}
+
+export function subscribeRealtimeProviderAsrEvents(
+  listener: (event: RealtimeProviderAsrEvent) => void
+): () => void {
+  providerAsrEvents.on("event", listener);
+  return () => providerAsrEvents.off("event", listener);
+}
+
+function scheduleAliyunPartialFinalization(segmentId: string): void {
+  const accumulator = segments.get(segmentId);
+
+  if (!accumulator || accumulator.latestStatus === "final") {
+    return;
+  }
+
+  if (accumulator.finalizeTimer) {
+    clearTimeout(accumulator.finalizeTimer);
+  }
+
+  accumulator.finalizeTimer = setTimeout(() => {
+    const latest = segments.get(segmentId);
+
+    if (!latest || latest.latestStatus === "final" || !latest.text.trim()) {
+      return;
+    }
+
+    const event = buildProviderEvent(
+      segmentId,
+      latest.text,
+      "final",
+      latest.firstChunk?.timestampMs,
+      latest.latestChunk
+        ? latest.latestChunk.timestampMs + latest.latestChunk.durationMs
+        : undefined
+    );
+    if (event) {
+      const finalized = segments.get(segmentId);
+      if (finalized) {
+        finalized.latestStatus = "final";
+        finalized.finalizeTimer = null;
+      }
+      bufferRealtimeProviderAsrEvent(event);
+    }
+  }, ALIYUN_PARTIAL_FINALIZE_DELAY_MS);
 }
 
 export function createAliyunRunTaskMessage(
@@ -681,7 +859,9 @@ export function mapAliyunRealtimeMessage(messageText: string): AliyunMappedEvent
     event,
     segmentId: `aliyun-sentence-${sentence.sentence_id ?? message.header?.task_id ?? "live"}`,
     text: sentence.text.trim(),
-    status: sentence.sentence_end ? "final" : "partial"
+    status: sentence.sentence_end ? "final" : "partial",
+    ...(Number.isFinite(sentence.begin_time) ? { audioStartMs: sentence.begin_time } : {}),
+    ...(Number.isFinite(sentence.end_time) ? { audioEndMs: sentence.end_time } : {})
   };
 }
 
@@ -693,6 +873,7 @@ function handleOpenAiMessage(messageText: string): void {
   } catch {
     return;
   }
+  retryAttempts = 0;
 
   if (message.type === "error") {
     updateSessionState({
@@ -707,8 +888,7 @@ function handleOpenAiMessage(messageText: string): void {
     const currentText = `${segments.get(segmentId)?.text ?? ""}${message.delta}`;
     const event = buildProviderEvent(segmentId, currentText, "partial");
     if (event) {
-      pendingAsrEvents.push(event);
-      updateSessionState({ recentLatencyMs: event.latencyMs, error: null });
+      bufferRealtimeProviderAsrEvent(event);
     }
   }
 
@@ -718,8 +898,7 @@ function handleOpenAiMessage(messageText: string): void {
   ) {
     const event = buildProviderEvent(buildSegmentId(message), message.transcript, "final");
     if (event) {
-      pendingAsrEvents.push(event);
-      updateSessionState({ recentLatencyMs: event.latencyMs, error: null });
+      bufferRealtimeProviderAsrEvent(event);
     }
   }
 
@@ -739,6 +918,7 @@ function handleAliyunMessage(messageText: string): void {
   }
 
   if (mapped.event === "task-started") {
+    retryAttempts = 0;
     aliyunTaskStarted = true;
     updateSessionState({ state: "streaming", error: null });
     return;
@@ -761,10 +941,18 @@ function handleAliyunMessage(messageText: string): void {
   }
 
   if (mapped.text && mapped.segmentId && mapped.status) {
-    const event = buildProviderEvent(mapped.segmentId, mapped.text, mapped.status);
+    const event = buildProviderEvent(
+      mapped.segmentId,
+      mapped.text,
+      mapped.status,
+      mapped.audioStartMs,
+      mapped.audioEndMs
+    );
     if (event) {
-      pendingAsrEvents.push(event);
-      updateSessionState({ recentLatencyMs: event.latencyMs, error: null });
+      bufferRealtimeProviderAsrEvent(event);
+      if (mapped.status === "partial") {
+        scheduleAliyunPartialFinalization(mapped.segmentId);
+      }
     }
   }
 }
@@ -889,6 +1077,9 @@ export function getProviderRuntimeConfig(): ProviderRuntimeConfig {
   const translationProvider = normalizeTranslationProvider(
     readEnv("TRANSLATION_PROVIDER", readEnv("VITE_AI_PROVIDER", "mock"))
   );
+  const refinementProvider = normalizeTranslationProvider(
+    readEnv("REFINEMENT_PROVIDER", readEnv("TRANSLATION_PROVIDER", readEnv("VITE_AI_PROVIDER", "mock")))
+  );
   const hasOpenAiKey = Boolean(readEnv("OPENAI_API_KEY"));
   const hasDeepSeekKey = Boolean(readEnv("DEEPSEEK_API_KEY"));
   const hasDashScopeKey = Boolean(readEnv("DASHSCOPE_API_KEY"));
@@ -902,15 +1093,36 @@ export function getProviderRuntimeConfig(): ProviderRuntimeConfig {
     missing.push("OPENAI_API_KEY");
   }
 
+  if (refinementProvider === "openai" && !hasOpenAiKey) {
+    missing.push("OPENAI_API_KEY");
+  }
+
   if (translationProvider === "deepseek" && !hasDeepSeekKey) {
     missing.push("DEEPSEEK_API_KEY");
   }
 
-  if ((asrProvider === "aliyun" || translationProvider === "aliyun") && !hasDashScopeKey) {
+  if (refinementProvider === "deepseek" && !hasDeepSeekKey) {
+    missing.push("DEEPSEEK_API_KEY");
+  }
+
+  if (
+    (asrProvider === "aliyun" || translationProvider === "aliyun" || refinementProvider === "aliyun") &&
+    !hasDashScopeKey
+  ) {
     missing.push("DASHSCOPE_API_KEY");
   }
 
   const realtimeEnabled = asrProvider !== "mock";
+  const translationModel =
+    readEnv("TRANSLATION_MODEL") ||
+    readEnv("VITE_TRANSLATION_MODEL") ||
+    (translationProvider === "openai"
+      ? "gpt-4.1-mini"
+      : translationProvider === "deepseek"
+        ? "deepseek-chat"
+        : translationProvider === "aliyun"
+          ? "qwen-plus"
+          : "mock-bilingual-translator");
 
   return {
     asrProvider,
@@ -929,21 +1141,34 @@ export function getProviderRuntimeConfig(): ProviderRuntimeConfig {
         : "https://api.openai.com/v1"
     ),
     translationProvider,
-    translationModel:
-      readEnv("TRANSLATION_MODEL") ||
-      readEnv("VITE_TRANSLATION_MODEL") ||
-      (translationProvider === "openai"
-        ? "gpt-4.1-mini"
-        : translationProvider === "deepseek"
-          ? "deepseek-chat"
-          : translationProvider === "aliyun"
-            ? "qwen-plus"
-            : "mock-bilingual-translator"),
+    translationModel,
+    fastDraftModel: readEnv("FAST_DRAFT_MODEL") || translationModel,
+    fastDraftStreaming: readBooleanEnv("FAST_DRAFT_STREAMING", translationProvider !== "mock"),
     translationBaseUrl:
       readEnv("TRANSLATION_BASE_URL") ||
       (translationProvider === "deepseek"
         ? "https://api.deepseek.com"
         : translationProvider === "aliyun"
+          ? "https://dashscope.aliyuncs.com/compatible-mode/v1"
+          : "https://api.openai.com/v1"),
+    refinementProvider,
+    refinementModel:
+      readEnv("REFINEMENT_MODEL") ||
+      readEnv("TRANSLATION_MODEL") ||
+      readEnv("VITE_TRANSLATION_MODEL") ||
+      (refinementProvider === "openai"
+        ? "gpt-4.1-mini"
+        : refinementProvider === "deepseek"
+          ? "deepseek-chat"
+          : refinementProvider === "aliyun"
+            ? "qwen-plus"
+            : "mock-subtitle-refiner"),
+    refinementBaseUrl:
+      readEnv("REFINEMENT_BASE_URL") ||
+      readEnv("TRANSLATION_BASE_URL") ||
+      (refinementProvider === "deepseek"
+        ? "https://api.deepseek.com"
+        : refinementProvider === "aliyun"
           ? "https://dashscope.aliyuncs.com/compatible-mode/v1"
           : "https://api.openai.com/v1"),
     hasOpenAiKey,
@@ -989,7 +1214,8 @@ export async function startRealtimeProviderSession(
   userStopped = false;
   retryAttempts = 0;
   pendingAsrEvents = [];
-  latestChunk = null;
+  audioEvidenceChunks = [];
+  clearSegmentFinalizeTimers();
   segments.clear();
 
   if (!config.realtimeEnabled) {
@@ -1010,6 +1236,7 @@ export async function startRealtimeProviderSession(
       asrProvider: config.asrProvider,
       translationProvider: config.translationProvider,
       queue: request.queue,
+      timing: { correlatedEvents: 0, uncorrelatedEvents: 0 },
       recentLatencyMs: null,
       error: `缺少本地配置：${config.missing.join(", ")}`,
       startedAtMs: null,
@@ -1027,6 +1254,7 @@ export async function startRealtimeProviderSession(
       asrProvider: config.asrProvider,
       translationProvider: config.translationProvider,
       queue: request.queue,
+      timing: { correlatedEvents: 0, uncorrelatedEvents: 0 },
       recentLatencyMs: null,
       error: "当前只实现 OpenAI realtime ASR streaming。",
       startedAtMs: null,
@@ -1043,6 +1271,7 @@ export async function startRealtimeProviderSession(
     asrProvider: config.asrProvider,
     translationProvider: config.translationProvider,
     queue: request.queue,
+    timing: { correlatedEvents: 0, uncorrelatedEvents: 0 },
     recentLatencyMs: null,
     error: null,
     startedAtMs: now,
@@ -1070,7 +1299,10 @@ export async function startRealtimeProviderSession(
 export function appendRealtimeProviderAudioChunk(
   chunk: AppendRealtimeProviderAudioChunkRequest
 ): AppendRealtimeProviderAudioChunkResponse {
-  latestChunk = chunk;
+  audioEvidenceChunks.push(chunk);
+  if (audioEvidenceChunks.length > AUDIO_EVIDENCE_BUFFER_LIMIT) {
+    audioEvidenceChunks = audioEvidenceChunks.slice(-AUDIO_EVIDENCE_BUFFER_LIMIT);
+  }
   updateRealtimeProviderQueueState(chunk.queue);
 
   if (
@@ -1139,8 +1371,9 @@ export function stopRealtimeProviderSession(): ProviderHealth {
   aliyunTaskId = null;
   aliyunTaskStarted = false;
   lastStartRequest = null;
-  latestChunk = null;
+  audioEvidenceChunks = [];
   pendingAsrEvents = [];
+  clearSegmentFinalizeTimers();
   segments.clear();
 
   sessionState = {

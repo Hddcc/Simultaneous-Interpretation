@@ -24,6 +24,7 @@ declare global {
   interface FloatingCaptionState {
     translatedText: string;
     sourceText: string;
+    previousText: string | null;
     statusLabel: string;
     compactStatusLabel: string;
     severity: "neutral" | "active" | "warning" | "error";
@@ -31,6 +32,11 @@ declare global {
     sessionStatus: string;
     latencyLabel: string;
     revised: boolean;
+    locked: boolean;
+    mousePassthrough: boolean;
+    opacity: number;
+    fontScale: number;
+    controlsVisible: boolean;
     updatedAtMs: number;
   }
 
@@ -51,7 +57,12 @@ declare global {
     asrBaseUrl: string;
     translationProvider: "mock" | "openai" | "deepseek" | "aliyun" | "custom";
     translationModel: string;
+    fastDraftModel: string;
+    fastDraftStreaming: boolean;
     translationBaseUrl: string;
+    refinementProvider: "mock" | "openai" | "deepseek" | "aliyun" | "custom";
+    refinementModel: string;
+    refinementBaseUrl: string;
     hasOpenAiKey: boolean;
     hasDeepSeekKey: boolean;
     hasDashScopeKey: boolean;
@@ -62,6 +73,10 @@ declare global {
   }
 
   interface TranslateTextRequest {
+    requestId?: string;
+    stream?: boolean;
+    fastDraft?: boolean;
+    minimumReadableCharacters?: number;
     text: string;
     sourceLanguage: string;
     targetLanguage: string;
@@ -74,6 +89,34 @@ declare global {
 
   interface TranslateTextResponse {
     text: string;
+    provider: "openai" | "deepseek" | "aliyun" | "custom";
+    model: string;
+    latencyMs: number;
+  }
+
+  interface TranslationDraftResponse extends TranslateTextResponse {
+    requestId: string;
+    receivedAtMs: number;
+    complete: boolean;
+  }
+
+  interface RefineSubtitleRequest {
+    sourceText: string;
+    translatedText: string;
+    sourceLanguage: string;
+    targetLanguage: string;
+    model?: string;
+    context?: Array<{
+      sourceText: string;
+      translatedText: string;
+    }>;
+    terminologyHints?: string[];
+  }
+
+  interface RefineSubtitleResponse {
+    refinedSourceText: string;
+    refinedTranslatedText: string;
+    reason: string;
     provider: "openai" | "deepseek" | "aliyun" | "custom";
     model: string;
     latencyMs: number;
@@ -133,7 +176,12 @@ declare global {
     asrBaseUrl: string;
     translationProvider: "mock" | "openai" | "deepseek" | "aliyun" | "custom";
     translationModel: string;
+    fastDraftModel: string;
+    fastDraftStreaming: boolean;
     translationBaseUrl: string;
+    refinementProvider: "mock" | "openai" | "deepseek" | "aliyun" | "custom";
+    refinementModel: string;
+    refinementBaseUrl: string;
     hasOpenAiKey: boolean;
     hasDeepSeekKey: boolean;
     hasDashScopeKey: boolean;
@@ -152,6 +200,10 @@ declare global {
     asrProvider: "mock" | "openai" | "aliyun" | "custom";
     translationProvider: "mock" | "openai" | "deepseek" | "aliyun" | "custom";
     queue: RealtimeProviderQueueSnapshot;
+    timing: {
+      correlatedEvents: number;
+      uncorrelatedEvents: number;
+    };
     recentLatencyMs: number | null;
     error: string | null;
     startedAtMs: number | null;
@@ -186,6 +238,7 @@ declare global {
     sourceType: "system" | "microphone";
     sequence: number;
     timestampMs: number;
+    capturedAtMs?: number;
     durationMs: number;
     volume: number;
     queue: RealtimeProviderQueueSnapshot;
@@ -204,6 +257,9 @@ declare global {
     status: "partial" | "final";
     revision: number;
     receivedAtMs: number;
+    audioEvidenceEndAtMs: number | null;
+    asrReceivedAtMs: number;
+    timingCorrelation: "provider-offset" | "segment-revision" | "missing";
     latencyMs: number;
     provider: "mock" | "openai" | "aliyun" | "custom";
     model: string;
@@ -219,6 +275,7 @@ declare global {
       appName: string;
       version: string;
       selectLocalMediaFile: () => Promise<LocalMediaFile | null>;
+      exportSubtitleHistory: (content: string, suggestedName: string) => Promise<boolean>;
       listDesktopAudioSources: () => Promise<DesktopAudioSource[]>;
       getSystemAudioCaptureCapability: () => Promise<NativeSystemAudioCapability>;
       openFloatingCaption: (
@@ -228,6 +285,13 @@ declare global {
       configureFloatingCaption: (
         options: FloatingCaptionOptions
       ) => Promise<FloatingCaptionWindowResult>;
+      setFloatingCaptionInteraction: (
+        options: {
+          locked: boolean;
+          mousePassthrough: boolean;
+        }
+      ) => Promise<FloatingCaptionWindowResult>;
+      resetFloatingCaption: () => Promise<FloatingCaptionWindowResult>;
       getAiRuntimeConfig: () => Promise<AiRuntimeConfig>;
       getProviderHealth: () => Promise<ProviderHealth>;
       startRealtimeProviderSession: (
@@ -240,12 +304,20 @@ declare global {
         chunk: AppendRealtimeProviderAudioChunkRequest
       ) => Promise<AppendRealtimeProviderAudioChunkResponse>;
       pullRealtimeProviderAsrEvents: () => Promise<RealtimeProviderAsrEvent[]>;
+      onRealtimeProviderAsrEvent: (
+        callback: (event: RealtimeProviderAsrEvent) => void
+      ) => () => void;
       stopRealtimeProviderSession: () => Promise<ProviderHealth>;
       translateText: (request: TranslateTextRequest) => Promise<TranslateTextResponse>;
+      cancelTranslation: (requestId: string) => void;
+      onTranslationDraft: (
+        callback: (event: TranslationDraftResponse) => void
+      ) => () => void;
       transcribeLocalMediaFile: (
         request: TranscribeLocalMediaFileRequest
       ) => Promise<TranscribeLocalMediaFileResponse>;
       updateFloatingCaption: (state: FloatingCaptionState) => void;
+      refineSubtitle: (request: RefineSubtitleRequest) => Promise<RefineSubtitleResponse>;
       onFloatingCaptionUpdate: (callback: (state: FloatingCaptionState) => void) => () => void;
     };
   }

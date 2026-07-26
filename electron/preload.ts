@@ -11,6 +11,7 @@ interface FloatingCaptionOptions {
 interface FloatingCaptionState {
   translatedText: string;
   sourceText: string;
+  previousText: string | null;
   statusLabel: string;
   compactStatusLabel: string;
   severity: "neutral" | "active" | "warning" | "error";
@@ -18,6 +19,11 @@ interface FloatingCaptionState {
   sessionStatus: string;
   latencyLabel: string;
   revised: boolean;
+  locked: boolean;
+  mousePassthrough: boolean;
+  opacity: number;
+  fontScale: number;
+  controlsVisible: boolean;
   updatedAtMs: number;
 }
 
@@ -28,7 +34,12 @@ interface AiRuntimeConfig {
   asrBaseUrl: string;
   translationProvider: "mock" | "openai" | "deepseek" | "aliyun" | "custom";
   translationModel: string;
+  fastDraftModel: string;
+  fastDraftStreaming: boolean;
   translationBaseUrl: string;
+  refinementProvider: "mock" | "openai" | "deepseek" | "aliyun" | "custom";
+  refinementModel: string;
+  refinementBaseUrl: string;
   hasOpenAiKey: boolean;
   hasDeepSeekKey: boolean;
   hasDashScopeKey: boolean;
@@ -39,6 +50,10 @@ interface AiRuntimeConfig {
 }
 
 interface TranslateTextRequest {
+  requestId?: string;
+  stream?: boolean;
+  fastDraft?: boolean;
+  minimumReadableCharacters?: number;
   text: string;
   sourceLanguage: string;
   targetLanguage: string;
@@ -51,6 +66,34 @@ interface TranslateTextRequest {
 
 interface TranslateTextResponse {
   text: string;
+  provider: "openai" | "deepseek" | "aliyun" | "custom";
+  model: string;
+  latencyMs: number;
+}
+
+interface TranslationDraftResponse extends TranslateTextResponse {
+  requestId: string;
+  receivedAtMs: number;
+  complete: boolean;
+}
+
+interface RefineSubtitleRequest {
+  sourceText: string;
+  translatedText: string;
+  sourceLanguage: string;
+  targetLanguage: string;
+  model?: string;
+  context?: Array<{
+    sourceText: string;
+    translatedText: string;
+  }>;
+  terminologyHints?: string[];
+}
+
+interface RefineSubtitleResponse {
+  refinedSourceText: string;
+  refinedTranslatedText: string;
+  reason: string;
   provider: "openai" | "deepseek" | "aliyun" | "custom";
   model: string;
   latencyMs: number;
@@ -110,7 +153,12 @@ interface ProviderRuntimeConfig {
   asrBaseUrl: string;
   translationProvider: "mock" | "openai" | "deepseek" | "aliyun" | "custom";
   translationModel: string;
+  fastDraftModel: string;
+  fastDraftStreaming: boolean;
   translationBaseUrl: string;
+  refinementProvider: "mock" | "openai" | "deepseek" | "aliyun" | "custom";
+  refinementModel: string;
+  refinementBaseUrl: string;
   hasOpenAiKey: boolean;
   hasDeepSeekKey: boolean;
   hasDashScopeKey: boolean;
@@ -129,6 +177,10 @@ interface RealtimeProviderSessionState {
   asrProvider: "mock" | "openai" | "aliyun" | "custom";
   translationProvider: "mock" | "openai" | "deepseek" | "aliyun" | "custom";
   queue: RealtimeProviderQueueSnapshot;
+  timing: {
+    correlatedEvents: number;
+    uncorrelatedEvents: number;
+  };
   recentLatencyMs: number | null;
   error: string | null;
   startedAtMs: number | null;
@@ -163,6 +215,7 @@ interface AppendRealtimeProviderAudioChunkRequest {
   sourceType: "system" | "microphone";
   sequence: number;
   timestampMs: number;
+  capturedAtMs?: number;
   durationMs: number;
   volume: number;
   queue: RealtimeProviderQueueSnapshot;
@@ -181,6 +234,9 @@ interface RealtimeProviderAsrEvent {
   status: "partial" | "final";
   revision: number;
   receivedAtMs: number;
+  audioEvidenceEndAtMs: number | null;
+  asrReceivedAtMs: number;
+  timingCorrelation: "provider-offset" | "segment-revision" | "missing";
   latencyMs: number;
   provider: "mock" | "openai" | "aliyun" | "custom";
   model: string;
@@ -192,9 +248,11 @@ interface AppendRealtimeProviderAudioChunkResponse {
 }
 
 contextBridge.exposeInMainWorld("simultaneousInterpretation", {
-  appName: "声桥 LinguaBridge",
+  appName: "同声传译",
   version: "0.1.0",
   selectLocalMediaFile: () => ipcRenderer.invoke("dialog:select-local-media-file"),
+  exportSubtitleHistory: (content: string, suggestedName: string) =>
+    ipcRenderer.invoke("dialog:export-subtitle-history", content, suggestedName),
   listDesktopAudioSources: () => ipcRenderer.invoke("desktop:list-audio-sources"),
   getSystemAudioCaptureCapability: () =>
     ipcRenderer.invoke("native-audio:get-system-capture-capability"),
@@ -203,6 +261,9 @@ contextBridge.exposeInMainWorld("simultaneousInterpretation", {
   closeFloatingCaption: () => ipcRenderer.invoke("floating-caption:close"),
   configureFloatingCaption: (options: FloatingCaptionOptions) =>
     ipcRenderer.invoke("floating-caption:configure", options),
+  setFloatingCaptionInteraction: (options: { locked: boolean; mousePassthrough: boolean }) =>
+    ipcRenderer.invoke("floating-caption:set-interaction", options),
+  resetFloatingCaption: () => ipcRenderer.invoke("floating-caption:reset"),
   getAiRuntimeConfig: () => ipcRenderer.invoke("ai:get-runtime-config"),
   getProviderHealth: () => ipcRenderer.invoke("provider:get-health"),
   startRealtimeProviderSession: (request: StartRealtimeProviderSessionRequest) =>
@@ -212,8 +273,25 @@ contextBridge.exposeInMainWorld("simultaneousInterpretation", {
   appendRealtimeProviderAudioChunk: (chunk: AppendRealtimeProviderAudioChunkRequest) =>
     ipcRenderer.invoke("provider:append-audio-chunk", chunk),
   pullRealtimeProviderAsrEvents: () => ipcRenderer.invoke("provider:pull-asr-events"),
+  onRealtimeProviderAsrEvent: (callback: (event: RealtimeProviderAsrEvent) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, event: RealtimeProviderAsrEvent) => {
+      callback(event);
+    };
+    ipcRenderer.on("provider:asr-event", listener);
+    return () => ipcRenderer.removeListener("provider:asr-event", listener);
+  },
   stopRealtimeProviderSession: () => ipcRenderer.invoke("provider:stop-realtime-session"),
   translateText: (request: TranslateTextRequest) => ipcRenderer.invoke("ai:translate-text", request),
+  cancelTranslation: (requestId: string) => ipcRenderer.send("ai:cancel-translation", requestId),
+  onTranslationDraft: (callback: (event: TranslationDraftResponse) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, event: TranslationDraftResponse) => {
+      callback(event);
+    };
+    ipcRenderer.on("ai:translation-draft", listener);
+    return () => ipcRenderer.removeListener("ai:translation-draft", listener);
+  },
+  refineSubtitle: (request: RefineSubtitleRequest) =>
+    ipcRenderer.invoke("ai:refine-subtitle", request),
   transcribeLocalMediaFile: (request: TranscribeLocalMediaFileRequest) =>
     ipcRenderer.invoke("ai:transcribe-local-media-file", request),
   updateFloatingCaption: (state: FloatingCaptionState) =>

@@ -1,5 +1,7 @@
 import type { AsrSegment } from "../asr/types";
+import { calculateRealtimeLatencies } from "../realtime/latency";
 import type {
+  SubtitleRefinementEvent,
   SubtitleSegment,
   TranslationContextItem,
   TranslationEvent
@@ -10,6 +12,7 @@ export const DEFAULT_REVISION_WINDOW = 4;
 interface ReconcileSubtitleSegmentsInput {
   current: SubtitleSegment[];
   translationEvents: TranslationEvent[];
+  refinementEvents?: SubtitleRefinementEvent[];
   asrSegments: AsrSegment[];
   revisionWindow: number;
   providerConnectionState?: string | null;
@@ -46,7 +49,13 @@ function getRevisionReason(
     return "asr-correction";
   }
 
-  if (provenance === "translation-correction" || provenance === "manual-fallback") {
+  if (
+    provenance === "translation-correction" ||
+    provenance === "refinement-correction" ||
+    provenance === "manual-fallback" ||
+    provenance === "history-backfill" ||
+    provenance === "active-lane-supersession"
+  ) {
     return "translation-correction";
   }
 
@@ -63,6 +72,10 @@ function getRevisionProvenance(
   asrSegment: AsrSegment,
   providerConnectionState?: string | null
 ): SubtitleSegment["revisionProvenance"] {
+  if (event.historyBackfill) {
+    return "history-backfill";
+  }
+
   if (!existing) {
     return "initial";
   }
@@ -126,8 +139,9 @@ export function reconcileSubtitleSegments(
     const currentIndex = input.current.findIndex((segment) => segment.id === event.segmentId);
     const withinRevisionWindow =
       !existing || (currentIndex >= 0 && currentIndex < input.revisionWindow);
+    const eligibleHistoryBackfill = Boolean(event.historyBackfill && asrSegment.status === "final");
 
-    if (existing && !withinRevisionWindow) {
+    if (existing && !withinRevisionWindow && !eligibleHistoryBackfill) {
       return;
     }
 
@@ -143,6 +157,23 @@ export function reconcileSubtitleSegments(
     );
     const revision = existing ? existing.revision + 1 : Math.max(1, event.revision);
     const status = asrSegment.status === "final" ? "final" : "partial";
+    const timing = {
+      audioEvidenceEndAtMs:
+        existing?.audioEvidenceEndAtMs ?? event.audioEvidenceEndAtMs ?? asrSegment.audioEvidenceEndAtMs,
+      asrReceivedAtMs:
+        existing?.asrReceivedAtMs ?? event.asrReceivedAtMs ?? asrSegment.asrReceivedAtMs,
+      translationEligibleAtMs:
+        existing?.translationEligibleAtMs ?? event.translationEligibleAtMs ?? null,
+      translationRequestedAtMs:
+        existing?.translationRequestedAtMs ?? event.translationRequestedAtMs ?? null,
+      firstDraftReceivedAtMs:
+        existing?.firstDraftReceivedAtMs ?? event.firstDraftReceivedAtMs ?? null,
+      firstDraftVisibleAtMs:
+        existing?.firstDraftVisibleAtMs ?? event.firstDraftVisibleAtMs ?? null,
+      finalVisibleAtMs: event.finalVisibleAtMs ?? existing?.finalVisibleAtMs ?? null,
+      refinementVisibleAtMs: existing?.refinementVisibleAtMs ?? null
+    };
+    const latency = calculateRealtimeLatencies(timing);
 
     byId.set(event.segmentId, {
       id: event.segmentId,
@@ -159,12 +190,20 @@ export function reconcileSubtitleSegments(
       updatedAtMs: event.createdAtMs,
       asrLatencyMs: asrSegment.latencyMs,
       translationLatencyMs: event.latencyMs,
-      totalLatencyMs: asrSegment.latencyMs + event.latencyMs,
+      totalLatencyMs:
+        latency.endToEndMs ?? latency.fastDraftMs ?? asrSegment.latencyMs + event.latencyMs,
       contextSize: event.contextSize,
       translationProvider: event.provider,
       translationModel: event.model,
       translationError: event.error,
       translationFallback: event.fallback,
+      ...timing,
+      fastDraftLatencyMs: latency.fastDraftMs,
+      endToEndLatencyMs: latency.endToEndMs,
+      finalLatencyMs: latency.finalMs,
+      historyBackfill: existing?.historyBackfill || eligibleHistoryBackfill,
+      backfillAtMs: eligibleHistoryBackfill ? event.createdAtMs : existing?.backfillAtMs ?? null,
+      rollbackGuardStartedAtMs: existing?.rollbackGuardStartedAtMs ?? asrSegment.startedAtMs,
       revised: Boolean(existing)
     });
 
@@ -172,6 +211,56 @@ export function reconcileSubtitleSegments(
       segmentId: event.segmentId,
       revision,
       provenance
+    });
+  });
+
+  input.refinementEvents?.forEach((event) => {
+    const existing = byId.get(event.segmentId);
+    const currentIndex = input.current.findIndex((segment) => segment.id === event.segmentId);
+    const withinRevisionWindow =
+      existing &&
+      currentIndex >= 0 &&
+      (currentIndex < input.revisionWindow || existing.historyBackfill);
+
+    if (!existing || !withinRevisionWindow) {
+      return;
+    }
+
+    const sourceChanged = existing.sourceText !== event.refinedSourceText;
+    const translationChanged = existing.translatedText !== event.refinedTranslatedText;
+
+    if (!sourceChanged && !translationChanged && existing.refinementError === event.error) {
+      return;
+    }
+
+    const revision = existing.revision + 1;
+    const refinementVisibleAtMs = event.refinementVisibleAtMs ?? event.createdAtMs;
+    const refinementLatency = calculateRealtimeLatencies({
+      firstDraftVisibleAtMs: existing.firstDraftVisibleAtMs,
+      refinementVisibleAtMs
+    }).refinementMs;
+
+    byId.set(event.segmentId, {
+      ...existing,
+      sourceText: event.refinedSourceText || existing.sourceText,
+      translatedText: event.refinedTranslatedText || existing.translatedText,
+      revision,
+      revisionReason: "translation-correction",
+      revisionProvenance: "refinement-correction",
+      updatedAtMs: event.createdAtMs,
+      refinementVisibleAtMs,
+      refinementProvider: event.provider,
+      refinementModel: event.model,
+      refinementLatencyMs: refinementLatency ?? event.latencyMs,
+      refinementError: event.error,
+      refinementFallback: event.fallback,
+      revised: true
+    });
+
+    applied.push({
+      segmentId: event.segmentId,
+      revision,
+      provenance: "refinement-correction"
     });
   });
 

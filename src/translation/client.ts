@@ -47,6 +47,15 @@ function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "真实翻译服务调用失败。";
 }
 
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) {
+    return;
+  }
+  const error = new Error("translation request aborted");
+  error.name = "AbortError";
+  throw error;
+}
+
 function createBaseTranslationEvent(
   request: TranslationRequest,
   translatedText: string,
@@ -73,12 +82,22 @@ function createBaseTranslationEvent(
     revision: request.segment.revision,
     revisionReason,
     createdAtMs,
+    audioEvidenceEndAtMs: request.segment.audioEvidenceEndAtMs,
+    asrReceivedAtMs: request.segment.asrReceivedAtMs,
+    translationEligibleAtMs: request.translationEligibleAtMs ?? request.segment.updatedAtMs,
+    translationRequestedAtMs: request.translationRequestedAtMs ?? createdAtMs - latencyMs,
+    firstDraftReceivedAtMs: createdAtMs,
+    firstDraftVisibleAtMs: null,
+    finalVisibleAtMs: null,
+    refinementVisibleAtMs: null,
     latencyMs,
     contextSize: request.context.length,
     provider: metadata.provider,
     model: metadata.model,
     error: metadata.error,
-    fallback: metadata.fallback
+    fallback: metadata.fallback,
+    streaming: false,
+    complete: true
   };
 }
 
@@ -126,16 +145,23 @@ async function getTranslationProviderHealth(): Promise<ProviderHealth | null> {
 }
 
 async function createProviderTranslationEvent(request: TranslationRequest): Promise<TranslationEvent> {
+  throwIfAborted(request.signal);
   const api = window.simultaneousInterpretation;
   const health = await getTranslationProviderHealth();
+  throwIfAborted(request.signal);
   const provider = health?.config.translationProvider ?? "mock";
-  const model = health?.config.translationModel ?? request.languagePair.translationModel;
+  const fastDraft = request.lane === "active";
+  const model =
+    (fastDraft ? health?.config.fastDraftModel : health?.config.translationModel) ??
+    request.languagePair.translationModel;
+  const stream = fastDraft && Boolean(health?.config.fastDraftStreaming);
 
-  if (provider === "mock" || request.segment.status !== "final") {
+  if (provider === "mock") {
     return createMockTranslationEvent(request);
   }
 
   const startedAtMs = Date.now();
+  const requestId = `translation-${request.segment.id}-${request.segment.revision}-${startedAtMs}`;
 
   if (!api?.translateText) {
     return createFallbackTranslationEvent(
@@ -147,22 +173,58 @@ async function createProviderTranslationEvent(request: TranslationRequest): Prom
     );
   }
 
+  const cancel = () => api.cancelTranslation?.(requestId);
+  let unsubscribeDraft: (() => void) | undefined;
+
   try {
+    request.signal?.addEventListener("abort", cancel, { once: true });
+    if (stream && request.onDraft && api.onTranslationDraft) {
+      unsubscribeDraft = api.onTranslationDraft((draft) => {
+        if (draft.requestId !== requestId || draft.complete || request.signal?.aborted) {
+          return;
+        }
+        request.onDraft?.({
+          ...createBaseTranslationEvent(request, draft.text, draft.latencyMs, {
+            provider: draft.provider,
+            model: draft.model,
+            error: null,
+            fallback: false
+          }),
+          createdAtMs: draft.receivedAtMs,
+          firstDraftReceivedAtMs: draft.receivedAtMs,
+          streaming: true,
+          complete: false
+        });
+      });
+    }
     const response = await api.translateText({
+      requestId,
+      stream,
+      fastDraft,
+      minimumReadableCharacters: 6,
       text: request.segment.text,
       sourceLanguage: request.languagePair.source.translationLocale,
       targetLanguage: request.languagePair.target.translationLocale,
       model,
       context: request.context
     });
+    throwIfAborted(request.signal);
 
-    return createBaseTranslationEvent(request, response.text, response.latencyMs, {
-      provider: response.provider,
-      model: response.model,
-      error: null,
-      fallback: false
-    });
+    return {
+      ...createBaseTranslationEvent(request, response.text, response.latencyMs, {
+        provider: response.provider,
+        model: response.model,
+        error: null,
+        fallback: false
+      }),
+      streaming: stream,
+      complete: true
+    };
   } catch (error) {
+    if (request.signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
+      throwIfAborted(request.signal);
+      throw error;
+    }
     return createFallbackTranslationEvent(
       request,
       Date.now() - startedAtMs,
@@ -170,6 +232,9 @@ async function createProviderTranslationEvent(request: TranslationRequest): Prom
       model,
       error
     );
+  } finally {
+    request.signal?.removeEventListener("abort", cancel);
+    unsubscribeDraft?.();
   }
 }
 

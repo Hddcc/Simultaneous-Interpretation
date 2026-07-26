@@ -1,0 +1,137 @@
+{
+  "id": "realtime-catch-up-english-v1",
+  "description": "Fixed English speech sample for low-latency fast-draft model comparison.",
+  "sourceLanguage": "English",
+  "targetLanguage": "Chinese",
+  "minimumQualityPassRate": 0.9,
+  "preserveLiterals": ["12", "API", "160", "500", "900", "2"],
+  "qualityRules": [
+    { "sourceIncludes": "audio", "targetAny": ["音频"] },
+    { "sourceIncludes": "Qwen", "targetAny": ["Qwen", "通义千问"] },
+    { "sourceIncludes": "subtitle", "targetAny": ["字幕"] },
+    { "sourceIncludes": "API", "targetAny": ["API"] },
+    { "sourceIncludes": "scheduler", "targetAny": ["调度"] },
+    { "sourceIncludes": "partial", "targetAny": ["临时", "部分", "partial"] },
+    { "sourceIncludes": "final", "targetAny": ["最终", "定稿", "final"] },
+    { "sourceIncludes": "history", "targetAny": ["历史"] },
+    { "sourceIncludes": "milliseconds", "targetAny": ["毫秒"] },
+    { "sourceIncludes": "mean", "targetAny": ["平均", "均值"] },
+    { "sourceIncludes": "P95", "targetAny": ["P95", "95百分位", "第95百分位"] },
+    { "sourceIncludes": "latency", "targetAny": ["延迟", "时延"] },
+    { "sourceIncludes": "pressure", "targetAny": ["压力"] },
+    { "sourceIncludes": "recover", "targetAny": ["恢复", "缓解"] },
+    { "sourceIncludes": "technical terms", "targetAny": ["技术术语", "专业术语"] }
+  ],
+  "utterances": [
+    {
+      "id": "audio-cadence",
+      "text": "Alice sends 12 audio chunks every second to the realtime recognizer during browser playback.",
+      "partials": [
+        "Alice sends 12 audio chunks.",
+        "Alice sends 12 audio chunks every second.",
+        "Alice sends 12 audio chunks every second to the recognizer.",
+        "Alice sends 12 audio chunks every second to the realtime recognizer.",
+        "Alice sends 12 audio chunks every second to the realtime recognizer during browser playback."
+      ]
+    },
+    {
+      "id": "first-draft",
+      "text": "The Qwen model returns the first readable subtitle draft before the complete translation arrives.",
+      "partials": [
+        "The Qwen model returns a draft.",
+        "The Qwen model returns the first readable draft.",
+        "The Qwen model returns the first readable subtitle draft.",
+        "The Qwen model returns the first readable subtitle draft before the translation.",
+        "The Qwen model returns the first readable subtitle draft before the complete translation arrives."
+      ]
+    },
+    {
+      "id": "active-cue",
+      "text": "Our API keeps the active subtitle cue within one segment of the latest speech.",
+      "partials": [
+        "Our API keeps the subtitle current.",
+        "Our API keeps the active subtitle cue current.",
+        "Our API keeps the active subtitle cue within one segment.",
+        "Our API keeps the active subtitle cue within one segment of speech.",
+        "Our API keeps the active subtitle cue within one segment of the latest speech."
+      ]
+    },
+    {
+      "id": "cancel-partial",
+      "text": "The scheduler cancels an outdated partial translation when a newer revision becomes eligible.",
+      "partials": [
+        "The scheduler cancels outdated work.",
+        "The scheduler cancels an outdated partial translation.",
+        "The scheduler cancels an outdated partial translation when a revision arrives.",
+        "The scheduler cancels an outdated partial translation when a newer revision arrives.",
+        "The scheduler cancels an outdated partial translation when a newer revision becomes eligible."
+      ]
+    },
+    {
+      "id": "history-backfill",
+      "text": "Final recognition results continue into history backfill without moving the active subtitle backward.",
+      "partials": [
+        "Final recognition results are preserved.",
+        "Final recognition results continue into history.",
+        "Final recognition results continue into history backfill.",
+        "Final recognition results continue into history backfill without moving the subtitle.",
+        "Final recognition results continue into history backfill without moving the active subtitle backward."
+      ]
+    },
+    {
+      "id": "chunk-duration",
+      "text": "The audio chunk duration is 160 milliseconds for the low latency reference configuration.",
+      "partials": [
+        "The audio chunk is 160 milliseconds.",
+        "The audio chunk duration is 160 milliseconds.",
+        "The audio chunk duration is 160 milliseconds for low latency.",
+        "The audio chunk duration is 160 milliseconds for the reference.",
+        "The audio chunk duration is 160 milliseconds for the low latency reference configuration."
+      ]
+    },
+    {
+      "id": "mean-target",
+      "text": "The fast draft mean target is 500 milliseconds after translation becomes eligible.",
+      "partials": [
+        "The fast draft mean is measured.",
+        "The fast draft mean target is 500 milliseconds.",
+        "The fast draft mean target is 500 milliseconds after translation.",
+        "The fast draft mean target is 500 milliseconds after translation becomes ready.",
+        "The fast draft mean target is 500 milliseconds after translation becomes eligible."
+      ]
+    },
+    {
+      "id": "p95-target",
+      "text": "The P95 latency target is 900 milliseconds for provider backed first drafts.",
+      "partials": [
+        "The P95 latency is measured.",
+        "The P95 latency target is 900 milliseconds.",
+        "The P95 latency target is 900 milliseconds for first drafts.",
+        "The P95 latency target is 900 milliseconds for provider first drafts.",
+        "The P95 latency target is 900 milliseconds for provider backed first drafts."
+      ]
+    },
+    {
+      "id": "pressure-recovery",
+      "text": "Translation pressure should recover within 2 seconds after the active queue becomes clear.",
+      "partials": [
+        "Translation pressure should recover.",
+        "Translation pressure should recover within 2 seconds.",
+        "Translation pressure should recover within 2 seconds after pressure clears.",
+        "Translation pressure should recover within 2 seconds after the queue clears.",
+        "Translation pressure should recover within 2 seconds after the active queue becomes clear."
+      ]
+    },
+    {
+      "id": "quality-guard",
+      "text": "Names, numbers, and technical terms must remain accurate in every subtitle revision.",
+      "partials": [
+        "Names and numbers must remain accurate.",
+        "Names, numbers, and technical terms must remain accurate.",
+        "Names, numbers, and technical terms must remain accurate in subtitles.",
+        "Names, numbers, and technical terms must remain accurate in every subtitle.",
+        "Names, numbers, and technical terms must remain accurate in every subtitle revision."
+      ]
+    }
+  ]
+}

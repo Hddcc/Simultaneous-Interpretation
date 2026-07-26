@@ -61,6 +61,8 @@ export function createStreamingAsrClient(config: AsrConfig): AsrClient {
       const text = status === "final" ? fullText : buildPartialText(fullText, revision, englishSource);
       const receivedAtMs = Date.now();
       const latencyMs = 260 + revision * 80 + Math.round((1 - chunk.volume) * 120);
+      const audioEvidenceEndAtMs =
+        chunk.payloadMetadata.producedAtMs || Math.max(0, receivedAtMs - latencyMs);
 
       return [
         {
@@ -75,6 +77,9 @@ export function createStreamingAsrClient(config: AsrConfig): AsrClient {
           status,
           revision,
           receivedAtMs,
+          audioEvidenceEndAtMs,
+          asrReceivedAtMs: receivedAtMs,
+          timingCorrelation: "segment-revision",
           latencyMs
         }
       ];

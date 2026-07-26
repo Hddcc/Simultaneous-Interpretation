@@ -4,7 +4,7 @@ import {
   DEFAULT_REVISION_WINDOW,
   reconcileSubtitleSegments
 } from "../src/subtitles/reconciliation";
-import type { SubtitleSegment, TranslationEvent } from "../src/translation/types";
+import type { SubtitleRefinementEvent, SubtitleSegment, TranslationEvent } from "../src/translation/types";
 
 function createAsrSegment(
   id: string,
@@ -137,6 +137,21 @@ const oldRevisionAttempt = applyOne(
 assert.equal(oldRevisionAttempt.find((segment) => segment.id === "seg-5")?.sourceText, "source-5");
 assert.equal(oldRevisionAttempt.find((segment) => segment.id === "seg-5")?.revision, 1);
 
+const lateBackfillEvent = {
+  ...createTranslationEvent("seg-5", "source-5 finalized", "translated-5 backfilled"),
+  historyBackfill: true,
+  lane: "backfill" as const,
+  createdAtMs: 7000
+};
+const lateBackfill = applyOne(
+  oldSegments,
+  lateBackfillEvent,
+  createAsrSegment("seg-5", "source-5 finalized", "final", 1000)
+);
+assert.equal(lateBackfill.find((segment) => segment.id === "seg-5")?.translatedText, "translated-5 backfilled");
+assert.equal(lateBackfill.find((segment) => segment.id === "seg-5")?.revisionProvenance, "history-backfill");
+assert.equal(lateBackfill[0].id, "seg-1");
+
 const reconnectRevision = applyOne(
   translated,
   createTranslationEvent(
@@ -154,5 +169,39 @@ const reconnectRevision = applyOne(
 );
 
 assert.equal(reconnectRevision[0].revisionProvenance, "provider-reconnect");
+
+const refinementEvent: SubtitleRefinementEvent = {
+  id: "refinement-seg-1",
+  segmentId: "seg-1",
+  sourceText: translated[0].sourceText,
+  translatedText: translated[0].translatedText,
+  refinedSourceText: translated[0].sourceText,
+  refinedTranslatedText: "这条链路会接收一小段一小段的音频。",
+  languagePairId: "en-to-zh",
+  sourceLanguage: "英语",
+  targetLanguage: "中文",
+  revision: translated[0].revision,
+  createdAtMs: 2400,
+  latencyMs: 120,
+  contextSize: 2,
+  provider: "aliyun",
+  model: "qwen-plus",
+  error: null,
+  fallback: false,
+  reason: "natural Chinese subtitle"
+};
+
+const refined = reconcileSubtitleSegments({
+  current: translated,
+  translationEvents: [],
+  refinementEvents: [refinementEvent],
+  asrSegments: [createAsrSegment("seg-1", translated[0].sourceText, "final", 1000)],
+  revisionWindow: DEFAULT_REVISION_WINDOW
+}).segments;
+
+assert.equal(refined[0].revisionProvenance, "refinement-correction");
+assert.equal(refined[0].translatedText, "这条链路会接收一小段一小段的音频。");
+assert.equal(refined[0].refinementProvider, "aliyun");
+assert.equal(refined[0].refinementLatencyMs, 120);
 
 console.log("subtitle reconciliation checks passed");

@@ -1,14 +1,28 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  Check,
+  ChevronDown,
+  ChevronUp,
+  Clipboard,
+  Download,
+  History,
+  MonitorUp,
+  Settings,
+  Trash2,
+  X
+} from "lucide-react";
+import {
   createCapturedMicrophoneChunk,
   createCapturedSystemAudioChunk,
   createEmptyPayloadMetadata,
+  createPcm16PayloadFromFloatSamples,
   createPcm16PayloadFromTimeDomainSamples,
   createSimulatedChunk,
   formatTimestamp
 } from "./audio/simulator";
 import { createStreamingAsrClient } from "./asr/client";
 import { loadAsrConfig } from "./asr/config";
+import { RealtimeAsrEventDeduplicator } from "./asr/eventDeduplication";
 import type { AsrEvent, AsrSegment } from "./asr/types";
 import {
   getLanguagePair,
@@ -17,13 +31,28 @@ import {
   supportedLanguagePairs
 } from "./language/pairs";
 import { createLiveExperienceState } from "./liveExperience/state";
+import { loadRealtimeLatencyTuning } from "./realtime/tuning";
+import { createRealtimeDiagnosticsSnapshot, type RealtimeDiagnosticsSnapshot } from "./realtime/diagnostics";
+import { SessionLatencyAggregator } from "./realtime/latency";
+import {
+  ProviderLatencyReferenceRunner,
+  type ReferenceLatencyReport
+} from "./verification/realtimeLatencyReport";
+import {
+  emptyCaptionCueSnapshot,
+  updateCaptionCueSnapshot,
+  type CaptionCueSnapshot
+} from "./captions/cue";
 import {
   DEFAULT_REVISION_WINDOW,
   getSubtitleContextItems,
   reconcileSubtitleSegments
 } from "./subtitles/reconciliation";
 import { createTranslationClient } from "./translation/client";
-import type { SubtitleSegment, TranslationEvent } from "./translation/types";
+import { createSubtitleRefinementClient } from "./translation/refinementClient";
+import { createSubtitleRefinementScheduler } from "./translation/refinementScheduler";
+import { createLowLatencyTranslationScheduler } from "./translation/scheduler";
+import type { SubtitleRefinementEvent, SubtitleSegment, TranslationEvent } from "./translation/types";
 import type { TtsQueueItem, TtsSessionState } from "./tts/types";
 import type {
   AudioChunkQueueState,
@@ -35,6 +64,26 @@ import type {
   MicrophoneDevice,
   NormalizedAudioChunk
 } from "./audio/types";
+import { OrderedAudioPayloadQueue } from "./audio/payloadQueue";
+import { createDeferredHistoryWriter, type DeferredHistoryWriter } from "./history/deferredWriter";
+import { groupHistoryRecords } from "./history/grouping";
+import { toHistoryRecords } from "./history/projection";
+import {
+  clearHistory,
+  loadHistory,
+  saveHistory,
+  serializeHistoryText,
+  upsertHistoryRecords
+} from "./history/storage";
+import type { HistoryRecord } from "./history/types";
+import {
+  parseUiFontSize,
+  parseUiTheme,
+  UI_FONT_SIZE_KEY,
+  UI_THEME_KEY,
+  type UiFontSize,
+  type UiTheme
+} from "./ui/preferences";
 
 const sourceOptions: AudioSourceOption[] = [
   {
@@ -77,10 +126,12 @@ const initialSession: AudioSessionState = {
 
 const RECENT_REVISION_WINDOW = DEFAULT_REVISION_WINDOW;
 const PROVIDER_TRANSCRIPT_SEGMENT_MS = 2800;
+const realtimeLatencyTuning = loadRealtimeLatencyTuning();
 
 const defaultFloatingCaptionState: FloatingCaptionState = {
   translatedText: "等待字幕",
   sourceText: "开始输入后，这里会显示实时字幕。",
+  previousText: null,
   statusLabel: "等待输入",
   compactStatusLabel: "等待",
   severity: "neutral",
@@ -88,6 +139,11 @@ const defaultFloatingCaptionState: FloatingCaptionState = {
   sessionStatus: "idle",
   latencyLabel: "等待字幕",
   revised: false,
+  locked: false,
+  mousePassthrough: false,
+  opacity: 0.92,
+  fontScale: 1,
+  controlsVisible: true,
   updatedAtMs: Date.now()
 };
 
@@ -99,160 +155,6 @@ const initialTtsSession: TtsSessionState = {
   spokenIds: [],
   error: null
 };
-
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024 * 1024) {
-    return `${Math.max(1, Math.round(bytes / 1024))} KB`;
-  }
-
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-}
-
-function getSourceLabel(type: AudioSourceType): string {
-  return sourceOptions.find((option) => option.type === type)?.label ?? type;
-}
-
-function getRevisionReasonLabel(reason: SubtitleSegment["revisionReason"]): string {
-  if (reason === "asr-correction") {
-    return "原文更新";
-  }
-
-  if (reason === "translation-correction") {
-    return "译文优化";
-  }
-
-  return "初始版本";
-}
-
-function getRevisionProvenanceLabel(
-  provenance: SubtitleSegment["revisionProvenance"] | undefined
-): string {
-  if (provenance === "asr-partial-correction") {
-    return "ASR临时修正";
-  }
-
-  if (provenance === "asr-finalization") {
-    return "ASR最终确认";
-  }
-
-  if (provenance === "translation-correction") {
-    return "翻译修正";
-  }
-
-  if (provenance === "provider-reconnect") {
-    return "Provider重连恢复";
-  }
-
-  if (provenance === "manual-fallback") {
-    return "源文兜底";
-  }
-
-  return "初始版本";
-}
-
-function getTtsStatusLabel(status: TtsSessionState["status"]): string {
-  if (status === "speaking") {
-    return "播报中";
-  }
-
-  if (status === "queued") {
-    return "排队中";
-  }
-
-  if (status === "paused") {
-    return "已暂停";
-  }
-
-  if (status === "error") {
-    return "异常";
-  }
-
-  if (status === "idle") {
-    return "待播报";
-  }
-
-  return "已关闭";
-}
-
-function getNativeAudioCapabilityLabel(capability: NativeSystemAudioCapability | null): string {
-  if (!capability) {
-    return "检测中";
-  }
-
-  if (capability.status === "available") {
-    return "WASAPI 可用";
-  }
-
-  if (capability.status === "unsupported-platform") {
-    return "平台未支持";
-  }
-
-  return "Helper 未安装";
-}
-
-function getProviderConnectionLabel(state: ProviderConnectionState | undefined): string {
-  if (state === "ready") {
-    return "就绪";
-  }
-
-  if (state === "missing-config") {
-    return "缺少配置";
-  }
-
-  if (state === "connecting") {
-    return "连接中";
-  }
-
-  if (state === "streaming") {
-    return "流式会话";
-  }
-
-  if (state === "reconnecting") {
-    return "重连中";
-  }
-
-  if (state === "degraded") {
-    return "队列拥塞";
-  }
-
-  if (state === "closing") {
-    return "关闭中";
-  }
-
-  if (state === "closed") {
-    return "已关闭";
-  }
-
-  if (state === "error") {
-    return "异常";
-  }
-
-  return "本地模拟";
-}
-
-function getProviderModeLabel(providerHealth: ProviderHealth | null): string {
-  if (!providerHealth) {
-    return "检测中";
-  }
-
-  return `${providerHealth.config.asrProvider} ASR · ${providerHealth.config.translationProvider} 翻译`;
-}
-
-function getProviderKeyLabel(providerHealth: ProviderHealth | null): string {
-  if (!providerHealth) {
-    return "检测中";
-  }
-
-  if (providerHealth.config.missing.length > 0) {
-    return `缺少 ${providerHealth.config.missing.join(", ")}`;
-  }
-
-  if (!providerHealth.config.realtimeEnabled) {
-    return "模拟模式";
-  }
-
-  return "本地配置可用";
-}
 
 function getVolumeFromSamples(samples: Uint8Array): number {
   let sum = 0;
@@ -272,6 +174,19 @@ function getAnalyserSnapshot(analyser: AnalyserNode): { samples: Uint8Array; vol
     samples,
     volume: getVolumeFromSamples(samples)
   };
+}
+
+function getVolumeFromFloatSamples(samples: Float32Array): number {
+  if (samples.length === 0) {
+    return 0;
+  }
+
+  let sum = 0;
+  samples.forEach((sample) => {
+    sum += sample * sample;
+  });
+
+  return Math.min(1, Math.sqrt(sum / samples.length) * 3);
 }
 
 function supportsSpeechSynthesis(): boolean {
@@ -295,29 +210,121 @@ function splitTranscriptIntoSegments(text: string): string[] {
   return text.trim() ? [text.trim()] : [];
 }
 
+function createCaptureSessionId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `session-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function loadUiTheme(): UiTheme {
+  try {
+    return parseUiTheme(window.localStorage.getItem(UI_THEME_KEY));
+  } catch {
+    return "system";
+  }
+}
+
+function loadUiFontSize(): UiFontSize {
+  try {
+    return parseUiFontSize(window.localStorage.getItem(UI_FONT_SIZE_KEY));
+  } catch {
+    return "medium";
+  }
+}
+
 function FloatingCaptionWindow() {
   const appInfo = window.simultaneousInterpretation;
   const [caption, setCaption] = useState<FloatingCaptionState>(defaultFloatingCaptionState);
+  const [localLocked, setLocalLocked] = useState(defaultFloatingCaptionState.locked);
+  const [localMousePassthrough, setLocalMousePassthrough] = useState(
+    defaultFloatingCaptionState.mousePassthrough
+  );
+  const [localOpacity, setLocalOpacity] = useState(defaultFloatingCaptionState.opacity);
+  const [localFontScale, setLocalFontScale] = useState(defaultFloatingCaptionState.fontScale);
 
   useEffect(() => {
-    return appInfo?.onFloatingCaptionUpdate?.((state) => setCaption(state));
+    return appInfo?.onFloatingCaptionUpdate?.((state) => {
+      setCaption(state);
+      setLocalLocked(state.locked);
+      setLocalMousePassthrough(state.mousePassthrough);
+      setLocalOpacity(state.opacity);
+      setLocalFontScale(state.fontScale);
+    });
   }, [appInfo]);
+
+  function publishLocalCaption(next: Partial<FloatingCaptionState>): void {
+    const nextState = {
+      ...caption,
+      locked: localLocked,
+      mousePassthrough: localMousePassthrough,
+      opacity: localOpacity,
+      fontScale: localFontScale,
+      ...next,
+      updatedAtMs: Date.now()
+    };
+    setCaption(nextState);
+    appInfo?.updateFloatingCaption?.(nextState);
+  }
+
+  function toggleLocked(): void {
+    const nextLocked = !localLocked;
+    const nextPassthrough = nextLocked ? true : false;
+    setLocalLocked(nextLocked);
+    setLocalMousePassthrough(nextPassthrough);
+    void appInfo?.setFloatingCaptionInteraction?.({
+      locked: nextLocked,
+      mousePassthrough: nextPassthrough
+    });
+    publishLocalCaption({
+      locked: nextLocked,
+      mousePassthrough: nextPassthrough
+    });
+  }
+
+  function updateOpacity(nextOpacity: number): void {
+    setLocalOpacity(nextOpacity);
+    publishLocalCaption({ opacity: nextOpacity });
+  }
+
+  function updateFontScale(nextScale: number): void {
+    setLocalFontScale(nextScale);
+    publishLocalCaption({ fontScale: nextScale });
+  }
 
   return (
     <main
       className={`floating-caption-shell floating-${caption.severity} ${
         caption.revised ? "floating-revised" : ""
-      }`}
+      } ${localLocked ? "floating-locked" : ""}`}
+      style={
+        {
+          "--floating-opacity": localOpacity,
+          "--floating-font-scale": localFontScale
+        } as React.CSSProperties
+      }
     >
+      <div className="floating-controls" aria-label="悬浮字幕控制">
+        <button type="button" onClick={toggleLocked}>
+          {localLocked ? "解锁" : "锁定"}
+        </button>
+        <button type="button" onClick={() => updateFontScale(Math.max(0.82, localFontScale - 0.08))}>
+          A-
+        </button>
+        <button type="button" onClick={() => updateFontScale(Math.min(1.28, localFontScale + 0.08))}>
+          A+
+        </button>
+        <button type="button" onClick={() => updateOpacity(localOpacity > 0.82 ? 0.72 : 0.92)}>
+          透明
+        </button>
+        <button type="button" onClick={() => void appInfo?.closeFloatingCaption?.()}>
+          关闭
+        </button>
+      </div>
       <div className="floating-caption-top">
         <span>{caption.compactStatusLabel}</span>
         <span>{caption.languageDirection}</span>
       </div>
-      <p className="floating-source">{caption.sourceText}</p>
-      <p className="floating-translation">{caption.translatedText}</p>
-      <div className="floating-caption-bottom">
-        <span>{caption.sessionStatus}</span>
-        <span>{caption.latencyLabel}</span>
+      <div className="floating-caption-lines">
+        <p className="floating-source">{caption.sourceText}</p>
+        <p className="floating-translation">{caption.translatedText}</p>
       </div>
     </main>
   );
@@ -341,7 +348,6 @@ export function App() {
 
   const [session, setSession] = useState<AudioSessionState>(initialSession);
   const [activeLanguagePair, setActiveLanguagePair] = useState(loadPreferredLanguagePair);
-  const [recentChunks, setRecentChunks] = useState<NormalizedAudioChunk[]>([]);
   const [microphoneDevices, setMicrophoneDevices] = useState<MicrophoneDevice[]>([]);
   const [selectedMicrophoneId, setSelectedMicrophoneId] = useState("");
   const [desktopSources, setDesktopSources] = useState<DesktopAudioSource[]>([]);
@@ -349,11 +355,20 @@ export function App() {
   const [asrEvents, setAsrEvents] = useState<AsrEvent[]>([]);
   const [asrSegments, setAsrSegments] = useState<AsrSegment[]>([]);
   const [translationEvents, setTranslationEvents] = useState<TranslationEvent[]>([]);
+  const [refinementEvents, setRefinementEvents] = useState<SubtitleRefinementEvent[]>([]);
   const [subtitleSegments, setSubtitleSegments] = useState<SubtitleSegment[]>([]);
+  const [captionCueSnapshot, setCaptionCueSnapshot] =
+    useState<CaptionCueSnapshot>(emptyCaptionCueSnapshot);
+  const [historyRecords, setHistoryRecords] = useState<HistoryRecord[]>([]);
+  const [historyExpanded, setHistoryExpanded] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [theme, setTheme] = useState<UiTheme>(loadUiTheme);
+  const [fontSize, setFontSize] = useState<UiFontSize>(loadUiFontSize);
+  const [historyMessage, setHistoryMessage] = useState<string | null>(null);
+  const [confirmingClearHistory, setConfirmingClearHistory] = useState(false);
   const [floatingCaptionVisible, setFloatingCaptionVisible] = useState(false);
-  const [floatingLayout, setFloatingLayout] = useState<FloatingCaptionLayout>("standard");
-  const [floatingPosition, setFloatingPosition] =
-    useState<FloatingCaptionPosition>("bottom-right");
+  const floatingLayout: FloatingCaptionLayout = "standard";
+  const floatingPosition: FloatingCaptionPosition = "bottom-right";
   const [ttsSession, setTtsSession] = useState<TtsSessionState>(initialTtsSession);
   const [aiRuntimeConfig, setAiRuntimeConfig] = useState<AiRuntimeConfig | null>(null);
   const [providerHealth, setProviderHealth] = useState<ProviderHealth | null>(null);
@@ -361,17 +376,61 @@ export function App() {
     useState<NativeSystemAudioCapability | null>(null);
 
   const chunkSequenceRef = useRef(0);
-  const payloadQueueRef = useRef<NormalizedAudioChunk[]>([]);
+  const payloadQueueRef = useRef(new OrderedAudioPayloadQueue(AUDIO_PAYLOAD_QUEUE_MAX_DEPTH));
+  const payloadQueuePumpRunningRef = useRef(false);
   const payloadQueueStateRef = useRef<AudioChunkQueueState>(initialQueueState);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
+  const audioProcessorRef = useRef<ScriptProcessorNode | null>(null);
   const captureTimerRef = useRef<number | null>(null);
   const languagePairRef = useRef(activeLanguagePair);
   const providerHealthRef = useRef<ProviderHealth | null>(null);
+  const providerAsrEventDeduplicatorRef = useRef(new RealtimeAsrEventDeduplicator());
   const asrClientRef = useRef(createStreamingAsrClient(loadAsrConfig()));
   const translationClientRef = useRef(createTranslationClient());
+  const refinementClientRef = useRef(createSubtitleRefinementClient());
+  const translationSchedulerRef = useRef(
+    createLowLatencyTranslationScheduler(translationClientRef.current, {
+      minPartialCharacters: realtimeLatencyTuning.minPartialCharacters,
+      minPartialWords: realtimeLatencyTuning.minPartialWords,
+      partialDebounceMs: realtimeLatencyTuning.partialDebounceMs
+    })
+  );
+  const refinementSchedulerRef = useRef(
+    createSubtitleRefinementScheduler(refinementClientRef.current)
+  );
+  const latencyAggregatorRef = useRef(new SessionLatencyAggregator());
+  const referenceLatencyRunnerRef = useRef(new ProviderLatencyReferenceRunner());
   const subtitleSegmentsRef = useRef<SubtitleSegment[]>([]);
+  const captionCueSnapshotRef = useRef<CaptionCueSnapshot>(emptyCaptionCueSnapshot);
+  const floatingCaptionStateRef = useRef<FloatingCaptionState>(defaultFloatingCaptionState);
   const ttsSessionRef = useRef<TtsSessionState>(initialTtsSession);
+  const captureSessionIdRef = useRef<string | null>(null);
+  const captureEpochRef = useRef(0);
+  const historyRecordsRef = useRef<HistoryRecord[]>([]);
+  const historyLoadedRef = useRef(false);
+  const historyWriterRef = useRef<DeferredHistoryWriter | null>(null);
+
+  if (!historyWriterRef.current) {
+    historyWriterRef.current = createDeferredHistoryWriter({
+      commit(incoming) {
+        const stored = historyLoadedRef.current ? [] : loadHistory(window.localStorage);
+        const next = upsertHistoryRecords(
+          upsertHistoryRecords(stored, historyRecordsRef.current),
+          incoming
+        );
+        historyLoadedRef.current = true;
+        historyRecordsRef.current = next;
+        setHistoryRecords(next);
+        try {
+          saveHistory(window.localStorage, next);
+          setHistoryMessage(null);
+        } catch {
+          setHistoryMessage("历史暂时无法保存，当前内容仍会保留到窗口关闭前。");
+        }
+      }
+    });
+  }
 
   const selectedSource = useMemo(
     () => sourceOptions.find((option) => option.type === session.sourceType) ?? sourceOptions[0],
@@ -388,8 +447,17 @@ export function App() {
   const latestAsrSegment = asrSegments[0];
   const latestAsrEvent = asrEvents[0];
   const latestSubtitleSegment = subtitleSegments[0];
-  const latestTranslationEvent = translationEvents[0];
+  const activeCue = captionCueSnapshot.active;
+  const previousCue = captionCueSnapshot.previous;
   const asrConfig = asrClientRef.current.getConfig();
+  const isSessionRunning =
+    session.status === "streaming" ||
+    providerHealth?.session.state === "connecting" ||
+    providerHealth?.session.state === "streaming" ||
+    providerHealth?.session.state === "degraded" ||
+    providerHealth?.session.state === "reconnecting";
+  const primarySessionLabel = isSessionRunning ? "停止同传" : "开始同传";
+  const primarySessionAction = isSessionRunning ? stopSession : () => void startSession();
   const liveExperience = useMemo(
     () =>
       createLiveExperienceState({
@@ -399,38 +467,60 @@ export function App() {
       }),
     [nativeAudioCapability, providerHealth, session]
   );
+  const historyGroups = useMemo(() => groupHistoryRecords(historyRecords), [historyRecords]);
+  const recentContextGroups = useMemo(
+    () =>
+      historyGroups
+        .filter(
+          (group) =>
+            !group.records.some(
+              (record) =>
+                record.sessionId === captureSessionIdRef.current &&
+                record.segmentId === `${captureEpochRef.current}:${latestSubtitleSegment?.id}`
+            )
+        )
+        .slice(0, 3),
+    [historyGroups, latestSubtitleSegment?.id]
+  );
 
   const floatingCaptionState = useMemo<FloatingCaptionState>(
     () => ({
       translatedText:
-        latestSubtitleSegment?.translatedText ??
-        (latestAsrSegment ? "正在等待稳定片段生成译文" : "等待字幕"),
-      sourceText: latestSubtitleSegment?.sourceText ?? latestAsrSegment?.text ?? selectedSource.description,
-      statusLabel: latestSubtitleSegment
-        ? latestSubtitleSegment.revised
+        activeCue?.translatedText ||
+        (activeCue?.sourceText ? "正在生成译文" : latestAsrSegment ? "正在等待稳定片段生成译文" : "等待字幕"),
+      sourceText: activeCue?.sourceText ?? latestAsrSegment?.text ?? selectedSource.description,
+      previousText: previousCue ? previousCue.translatedText || previousCue.sourceText : null,
+      statusLabel: activeCue
+        ? activeCue.revised
           ? "字幕已修订"
-          : latestSubtitleSegment.status === "partial"
-            ? "临时字幕"
+          : activeCue.state === "listening" || activeCue.state === "drafting"
+            ? "正在听译"
             : "实时字幕"
         : liveExperience.label,
       compactStatusLabel: liveExperience.compactLabel,
       severity: liveExperience.severity,
       languageDirection: activeLanguagePair.label,
       sessionStatus: liveExperience.label,
-      latencyLabel: latestSubtitleSegment
-        ? `${latestSubtitleSegment.totalLatencyMs} ms`
+      latencyLabel: activeCue?.latency.totalLatencyMs !== null && activeCue?.latency.totalLatencyMs !== undefined
+        ? `${activeCue.latency.totalLatencyMs} ms`
         : latestAsrEvent
           ? `${latestAsrEvent.latencyMs} ms`
           : "等待字幕",
-      revised: Boolean(latestSubtitleSegment?.revised),
+      revised: Boolean(activeCue?.revised),
+      locked: floatingCaptionStateRef.current.locked,
+      mousePassthrough: floatingCaptionStateRef.current.mousePassthrough,
+      opacity: floatingCaptionStateRef.current.opacity,
+      fontScale: floatingCaptionStateRef.current.fontScale,
+      controlsVisible: true,
       updatedAtMs: Date.now()
     }),
     [
       activeLanguagePair.label,
+      activeCue,
       latestAsrEvent,
       latestAsrSegment,
-      latestSubtitleSegment,
       liveExperience,
+      previousCue,
       selectedSource.description,
     ]
   );
@@ -444,7 +534,7 @@ export function App() {
       const chunk = createSimulatedChunk("file", chunkSequenceRef.current, session.selectedFile);
       chunkSequenceRef.current += 1;
       recordChunk(chunk);
-    }, 500);
+    }, realtimeLatencyTuning.audioChunkDurationMs);
 
     return () => window.clearInterval(timer);
   }, [session.selectedFile, session.sourceType, session.status]);
@@ -453,6 +543,48 @@ export function App() {
     return () => {
       cleanupActiveCapture();
     };
+  }, []);
+
+  useEffect(() => {
+    let timerId: number | null = null;
+    const frameId = window.requestAnimationFrame(() => {
+      timerId = window.setTimeout(() => {
+        const stored = loadHistory(window.localStorage);
+        const next = upsertHistoryRecords(stored, historyRecordsRef.current);
+        historyLoadedRef.current = true;
+        historyRecordsRef.current = next;
+        setHistoryRecords(next);
+      }, 250);
+    });
+
+    const flushHistory = () => historyWriterRef.current?.flush();
+    window.addEventListener("beforeunload", flushHistory);
+    return () => {
+      window.cancelAnimationFrame(frameId);
+      if (timerId !== null) window.clearTimeout(timerId);
+      window.removeEventListener("beforeunload", flushHistory);
+      historyWriterRef.current?.dispose();
+    };
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(UI_THEME_KEY, theme);
+    } catch {
+      setHistoryMessage("界面偏好暂时无法保存。");
+    }
+  }, [theme]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(UI_FONT_SIZE_KEY, fontSize);
+    } catch {
+      setHistoryMessage("界面偏好暂时无法保存。");
+    }
+  }, [fontSize]);
+
+  useEffect(() => {
+    void refreshDesktopAudioSources();
   }, []);
 
   useEffect(() => {
@@ -465,6 +597,11 @@ export function App() {
   }, [providerHealth]);
 
   useEffect(() => {
+    captionCueSnapshotRef.current = captionCueSnapshot;
+  }, [captionCueSnapshot]);
+
+  useEffect(() => {
+    floatingCaptionStateRef.current = floatingCaptionState;
     appInfo?.updateFloatingCaption?.(floatingCaptionState);
   }, [appInfo, floatingCaptionState]);
 
@@ -485,13 +622,23 @@ export function App() {
   }, [appInfo]);
 
   useEffect(() => {
+    if (!appInfo?.onRealtimeProviderAsrEvent) {
+      return undefined;
+    }
+
+    return appInfo.onRealtimeProviderAsrEvent((event) => {
+      publishRealtimeProviderAsrEvents([event]);
+    });
+  }, [appInfo]);
+
+  useEffect(() => {
     if (!appInfo?.pullRealtimeProviderAsrEvents || !providerHealth?.session.sessionId) {
       return undefined;
     }
 
     const timer = window.setInterval(() => {
       void appInfo.pullRealtimeProviderAsrEvents?.().then(publishRealtimeProviderAsrEvents);
-    }, 500);
+    }, realtimeLatencyTuning.providerAsrPollIntervalMs);
 
     return () => window.clearInterval(timer);
   }, [appInfo, providerHealth?.session.sessionId]);
@@ -582,12 +729,45 @@ export function App() {
     return Boolean(health?.config.realtimeEnabled);
   }
 
+  function syncCaptionCueSnapshot(
+    nextAsrSegments: AsrSegment[],
+    nextTranslationEvents: TranslationEvent[] = [],
+    nextRefinementEvents: SubtitleRefinementEvent[] = []
+  ): void {
+    setCaptionCueSnapshot((current) => {
+      const candidate = [...nextAsrSegments].sort(
+        (left, right) => right.updatedAtMs - left.updatedAtMs
+      )[0];
+      if (
+        current.active &&
+        candidate &&
+        candidate.id !== current.active.id &&
+        candidate.startedAtMs < current.active.rollbackGuardStartedAtMs
+      ) {
+        translationSchedulerRef.current.recordRollbackBlock();
+      }
+      const next = updateCaptionCueSnapshot({
+        current,
+        asrSegments: nextAsrSegments,
+        translationEvents: nextTranslationEvents,
+        refinementEvents: nextRefinementEvents,
+        nowMs: Date.now(),
+        sourceLanguageLabel: languagePairRef.current.source.label,
+        targetLanguageLabel: languagePairRef.current.target.label
+      });
+      captionCueSnapshotRef.current = next;
+      return next;
+    });
+  }
+
   function publishRealtimeProviderAsrEvents(events: RealtimeProviderAsrEvent[]): void {
-    if (events.length === 0) {
+    const uniqueEvents = providerAsrEventDeduplicatorRef.current.filter(events);
+
+    if (uniqueEvents.length === 0) {
       return;
     }
 
-    const asrEventsFromProvider: AsrEvent[] = events.map((event) => ({
+    const asrEventsFromProvider: AsrEvent[] = uniqueEvents.map((event) => ({
       id: event.id,
       segmentId: event.segmentId,
       chunkId: event.chunkId,
@@ -599,6 +779,9 @@ export function App() {
       status: event.status,
       revision: event.revision,
       receivedAtMs: event.receivedAtMs,
+      audioEvidenceEndAtMs: event.audioEvidenceEndAtMs,
+      asrReceivedAtMs: event.asrReceivedAtMs,
+      timingCorrelation: event.timingCorrelation,
       latencyMs: event.latencyMs
     }));
 
@@ -610,6 +793,9 @@ export function App() {
       startedAtMs: event.audioStartMs,
       endedAtMs: event.audioEndMs,
       updatedAtMs: event.receivedAtMs,
+      audioEvidenceEndAtMs: event.audioEvidenceEndAtMs,
+      asrReceivedAtMs: event.asrReceivedAtMs,
+      timingCorrelation: event.timingCorrelation,
       latencyMs: event.latencyMs,
       revision: event.revision
     }));
@@ -624,6 +810,8 @@ export function App() {
         .sort((left, right) => right.updatedAtMs - left.updatedAtMs)
         .slice(0, 6);
     });
+    syncCaptionCueSnapshot(nextSegments);
+    updateInternalDiagnostics();
     void publishTranslationEvents(nextSegments);
   }
 
@@ -658,23 +846,6 @@ export function App() {
     setProviderHealth(nextHealth);
   }
 
-  function syncProviderQueue(queue: AudioChunkQueueState): void {
-    const currentProviderHealth = providerHealthRef.current ?? providerHealth;
-
-    if (
-      !appInfo?.updateRealtimeProviderQueueState ||
-      !currentProviderHealth?.config.realtimeEnabled ||
-      !currentProviderHealth.session.sessionId
-    ) {
-      return;
-    }
-
-    void appInfo.updateRealtimeProviderQueueState(toProviderQueueSnapshot(queue)).then((nextHealth) => {
-      providerHealthRef.current = nextHealth;
-      setProviderHealth(nextHealth);
-    });
-  }
-
   async function streamChunkToRealtimeProvider(
     chunk: NormalizedAudioChunk,
     queue: AudioChunkQueueState
@@ -705,6 +876,7 @@ export function App() {
       sourceType: chunk.sourceType,
       sequence: chunk.sequence,
       timestampMs: chunk.timestampMs,
+      capturedAtMs: chunk.payloadMetadata.producedAtMs || Date.now(),
       durationMs: chunk.durationMs,
       volume: chunk.volume,
       queue: toProviderQueueSnapshot(queue),
@@ -715,35 +887,45 @@ export function App() {
     publishRealtimeProviderAsrEvents(response.events);
   }
 
-  function updatePayloadQueue(
-    chunk: NormalizedAudioChunk,
-    currentQueue: AudioChunkQueueState
-  ): AudioChunkQueueState {
-    if (!chunk.payloadMetadata.available) {
-      payloadQueueRef.current = [];
-      return {
-        ...initialQueueState,
-        dropped: currentQueue.dropped,
-        lastSequence: chunk.sequence,
-        lastPayloadBytes: 0
-      };
+  function publishPayloadQueueState(queue: AudioChunkQueueState): void {
+    payloadQueueStateRef.current = queue;
+    setSession((current) => ({ ...current, queue }));
+  }
+
+  async function drainRealtimeProviderAudioQueue(): Promise<void> {
+    if (payloadQueuePumpRunningRef.current) {
+      return;
     }
 
-    const pendingChunks = [...payloadQueueRef.current, chunk];
-    const overflow = Math.max(0, pendingChunks.length - AUDIO_PAYLOAD_QUEUE_MAX_DEPTH);
-    payloadQueueRef.current = pendingChunks.slice(-AUDIO_PAYLOAD_QUEUE_MAX_DEPTH);
-
-    return {
-      maxDepth: AUDIO_PAYLOAD_QUEUE_MAX_DEPTH,
-      depth: payloadQueueRef.current.length,
-      dropped: currentQueue.dropped + overflow,
-      lastSequence: chunk.sequence,
-      lastPayloadBytes: chunk.payloadMetadata.byteLength
-    };
+    payloadQueuePumpRunningRef.current = true;
+    try {
+      let chunk = payloadQueueRef.current.take();
+      while (chunk) {
+        try {
+          await streamChunkToRealtimeProvider(chunk, payloadQueueRef.current.snapshot());
+        } catch (error) {
+          setSession((current) => ({
+            ...current,
+            error: error instanceof Error ? error.message : "实时 ASR 音频发送失败。"
+          }));
+        } finally {
+          publishPayloadQueueState(payloadQueueRef.current.complete(chunk.id));
+        }
+        chunk = payloadQueueRef.current.take();
+      }
+    } finally {
+      payloadQueuePumpRunningRef.current = false;
+    }
   }
 
   function recordChunk(chunk: NormalizedAudioChunk): void {
-    const nextQueue = updatePayloadQueue(chunk, payloadQueueStateRef.current);
+    const usesRealtimeProvider =
+      chunk.sourceType !== "file" &&
+      chunk.payloadMetadata.providerReady &&
+      shouldUseRealtimeProviderShell(providerHealthRef.current);
+    const nextQueue = usesRealtimeProvider
+      ? payloadQueueRef.current.enqueue(chunk)
+      : payloadQueueRef.current.reset(true);
     payloadQueueStateRef.current = nextQueue;
     setSession((current) => ({
       ...current,
@@ -753,17 +935,8 @@ export function App() {
       queue: nextQueue,
       error: null
     }));
-    syncProviderQueue(nextQueue);
-    setRecentChunks((current) => [chunk, ...current].slice(0, 5));
-
-    if (shouldUseRealtimeProviderShell(providerHealthRef.current)) {
-      void streamChunkToRealtimeProvider(chunk, nextQueue).catch((error) => {
-        setSession((current) => ({
-          ...current,
-          status: "error",
-          error: error instanceof Error ? error.message : "实时 ASR 音频发送失败。"
-        }));
-      });
+    if (usesRealtimeProvider) {
+      void drainRealtimeProviderAudioQueue();
       return;
     }
 
@@ -785,6 +958,9 @@ export function App() {
       startedAtMs: event.audioStartMs,
       endedAtMs: event.audioEndMs,
       updatedAtMs: event.receivedAtMs,
+      audioEvidenceEndAtMs: event.audioEvidenceEndAtMs,
+      asrReceivedAtMs: event.asrReceivedAtMs,
+      timingCorrelation: event.timingCorrelation,
       latencyMs: event.latencyMs,
       revision: event.revision
     }));
@@ -802,44 +978,257 @@ export function App() {
         .slice(0, 6);
     });
 
+    syncCaptionCueSnapshot(nextSegments);
     void publishTranslationEvents(nextSegments);
   }
 
-  async function publishTranslationEvents(changedSegments: AsrSegment[]): Promise<void> {
+  function publishTranslationEvents(changedSegments: AsrSegment[]): void {
     if (changedSegments.length === 0) {
       return;
     }
 
-    const nextEvents = await Promise.all(
-      changedSegments.map((segment) =>
-        translationClientRef.current.translate({
+    const ordered = [...changedSegments].sort(
+      (left, right) => left.updatedAtMs - right.updatedAtMs
+    );
+    const latestId = ordered.at(-1)?.id;
+
+    ordered.forEach((segment) => {
+      const activeCue = captionCueSnapshotRef.current.active;
+      const belongsToOlderSpeech = Boolean(
+        activeCue &&
+          segment.id !== activeCue.id &&
+          segment.startedAtMs < activeCue.rollbackGuardStartedAtMs
+      );
+      const lane =
+        segment.status === "final" && (belongsToOlderSpeech || segment.id !== latestId)
+          ? "backfill"
+          : "active";
+      void translationSchedulerRef.current
+        .schedule({
           segment,
           languagePair: languagePairRef.current,
-          context: getSubtitleContextItems(subtitleSegmentsRef.current, 3)
+          context: getSubtitleContextItems(subtitleSegmentsRef.current, 3),
+          nowMs: Date.now(),
+          lane,
+          onDraft: (event) => commitTranslationEvent(segment, event)
         })
-      )
-    );
+        .then((event) => {
+          if (event) {
+            commitTranslationEvent(segment, event);
+          }
+        })
+        .catch((error) => {
+          setSession((current) => ({
+            ...current,
+            error: `翻译服务：${error instanceof Error ? error.message : "请求失败"}`
+          }));
+        });
+    });
+  }
 
-    setTranslationEvents((current) => [...nextEvents, ...current].slice(0, 8));
-    const failedTranslation = nextEvents.find((event) => event.error);
-    if (failedTranslation?.error) {
+  function enqueueHistorySegments(segments: SubtitleSegment[]): void {
+    const sessionId = captureSessionIdRef.current ?? createCaptureSessionId();
+    captureSessionIdRef.current = sessionId;
+    const records = toHistoryRecords(segments, {
+      sessionId,
+      captureEpoch: captureEpochRef.current,
+      sourceType: session.sourceType,
+      languagePairId: activeLanguagePair.id
+    });
+    if (records.length > 0) historyWriterRef.current?.enqueue(records);
+  }
+
+  function commitSubtitleSegments(nextSegments: SubtitleSegment[]): void {
+    subtitleSegmentsRef.current = nextSegments;
+    setSubtitleSegments(nextSegments);
+    enqueueHistorySegments(nextSegments);
+  }
+
+  function commitTranslationEvent(segment: AsrSegment, event: TranslationEvent): void {
+    const firstDraftVisibleAtMs = Date.now();
+    const visibleEvent: TranslationEvent = {
+      ...event,
+      firstDraftVisibleAtMs: event.firstDraftVisibleAtMs ?? firstDraftVisibleAtMs,
+      finalVisibleAtMs:
+        segment.status === "final" && event.complete !== false
+          ? event.finalVisibleAtMs ?? firstDraftVisibleAtMs
+          : event.finalVisibleAtMs ?? null
+    };
+    const latencySample = {
+      id: visibleEvent.id,
+      providerBacked: visibleEvent.provider !== "mock",
+      fallback: visibleEvent.fallback,
+      error: visibleEvent.error,
+      audioEvidenceEndAtMs: visibleEvent.audioEvidenceEndAtMs,
+      asrReceivedAtMs: visibleEvent.asrReceivedAtMs,
+      translationEligibleAtMs: visibleEvent.translationEligibleAtMs,
+      translationRequestedAtMs: visibleEvent.translationRequestedAtMs,
+      firstDraftReceivedAtMs: visibleEvent.firstDraftReceivedAtMs,
+      firstDraftVisibleAtMs: visibleEvent.firstDraftVisibleAtMs,
+      finalVisibleAtMs: visibleEvent.finalVisibleAtMs,
+      refinementVisibleAtMs: visibleEvent.refinementVisibleAtMs
+    };
+    latencyAggregatorRef.current.record(latencySample);
+    referenceLatencyRunnerRef.current.recordSample(latencySample);
+
+    setTranslationEvents((current) => [visibleEvent, ...current].slice(0, 8));
+    if (visibleEvent.error) {
       setSession((current) => ({
         ...current,
-        error: `翻译服务：${failedTranslation.error}`
+        error: `翻译服务：${visibleEvent.error}`
       }));
     }
 
-    setSubtitleSegments((current) => {
-      const { segments: nextSegments } = reconcileSubtitleSegments({
-        current,
-        translationEvents: nextEvents,
-        asrSegments: changedSegments,
-        revisionWindow: RECENT_REVISION_WINDOW,
-        providerConnectionState: providerHealthRef.current?.session.state ?? null
-      });
-      subtitleSegmentsRef.current = nextSegments;
-      return nextSegments;
+    const { segments: nextSegments } = reconcileSubtitleSegments({
+      current: subtitleSegmentsRef.current,
+      translationEvents: [visibleEvent],
+      asrSegments: [segment],
+      revisionWindow: RECENT_REVISION_WINDOW,
+      providerConnectionState: providerHealthRef.current?.session.state ?? null
     });
+    commitSubtitleSegments(nextSegments);
+    if (!visibleEvent.historyBackfill) {
+      translationSchedulerRef.current.markVisible(segment.id, firstDraftVisibleAtMs, segment.updatedAtMs);
+      syncCaptionCueSnapshot([segment], [visibleEvent]);
+    }
+    updateRefinementPressure();
+    updateInternalDiagnostics();
+    window.setTimeout(updateRefinementPressure, 0);
+    void publishRefinementEvents([segment], [visibleEvent]);
+  }
+
+  function updateRefinementPressure(): void {
+    const translation = translationSchedulerRef.current.getDiagnostics();
+    const queue = providerHealthRef.current?.session.queue;
+    const asrQueueRatio = queue && queue.maxDepth > 0 ? queue.depth / queue.maxDepth : 0;
+    refinementSchedulerRef.current.updatePressure({
+      activeLag: translation.activeLag,
+      translationBacklog: translation.activeLaneDepth + translation.backfillDepth,
+      asrQueueRatio,
+      fastDraftLatencyMs:
+        captionCueSnapshotRef.current.active?.latency.fastDraftLatencyMs ??
+        translation.lastVisibleLatencyMs
+    });
+  }
+
+  function updateInternalDiagnostics(): void {
+    const health = providerHealthRef.current;
+    const snapshot = createRealtimeDiagnosticsSnapshot({
+      latency: latencyAggregatorRef.current.snapshot(),
+      translation: translationSchedulerRef.current.getDiagnostics(),
+      refinement: refinementSchedulerRef.current.getDiagnostics(),
+      providerQueue: health?.session.queue,
+      providerTiming: health?.session.timing
+    });
+    (window as Window & { __realtimeDiagnostics?: RealtimeDiagnosticsSnapshot }).__realtimeDiagnostics =
+      snapshot;
+    referenceLatencyRunnerRef.current.recordCatchUp({
+      atMs: snapshot.capturedAtMs,
+      activeLag: snapshot.translation.activeLag,
+      pressureActive: snapshot.refinement.paused,
+      catchUpState: snapshot.translation.catchUpState
+    });
+    const referenceReport = referenceLatencyRunnerRef.current.report({
+      requestCount: snapshot.translation.requestCount,
+      supersededPartials: snapshot.translation.supersededPartials,
+      cancellationAttempts: snapshot.translation.cancellationAttempts,
+      cancellationSucceeded: snapshot.translation.cancellationSucceeded,
+      cancellationIgnored: snapshot.translation.cancellationIgnored
+    });
+    (window as Window & { __realtimeReferenceReport?: ReferenceLatencyReport })
+      .__realtimeReferenceReport = referenceReport;
+  }
+
+  async function publishRefinementEvents(
+    changedSegments: AsrSegment[],
+    nextTranslationEvents: TranslationEvent[]
+  ): Promise<void> {
+    updateRefinementPressure();
+    const eligibleEvents = nextTranslationEvents.filter((event) => {
+      const segment = changedSegments.find((item) => item.id === event.segmentId);
+      return (
+        segment?.status === "final" &&
+        event.complete !== false &&
+        !event.error &&
+        Boolean(event.translatedText.trim())
+      );
+    });
+
+    if (eligibleEvents.length === 0) {
+      return;
+    }
+
+    const nextRefinements = (
+      await Promise.all(
+        eligibleEvents.map((event) => {
+          const segment = changedSegments.find((item) => item.id === event.segmentId);
+
+          if (!segment) {
+            return Promise.resolve(null);
+          }
+
+          return refinementSchedulerRef.current.schedule({
+            segmentId: event.segmentId,
+            sourceText: event.sourceText,
+            translatedText: event.translatedText,
+            languagePair: languagePairRef.current,
+            context: getSubtitleContextItems(subtitleSegmentsRef.current, 3),
+            revision: event.revision,
+            status: segment.status === "final" ? "final" : "partial",
+            terminologyHints: [],
+            firstDraftVisibleAtMs: event.firstDraftVisibleAtMs
+          });
+        })
+      )
+    ).filter((event): event is SubtitleRefinementEvent => Boolean(event));
+
+    const refinementVisibleAtMs = Date.now();
+    const visibleRefinements = nextRefinements.map((event) => ({
+      ...event,
+      refinementVisibleAtMs: event.refinementVisibleAtMs ?? refinementVisibleAtMs
+    }));
+
+    if (visibleRefinements.length === 0) {
+      return;
+    }
+
+    visibleRefinements.forEach((refinement) => {
+      const translation = nextTranslationEvents.find(
+        (event) => event.segmentId === refinement.segmentId
+      );
+      if (!translation) {
+        return;
+      }
+      const latencySample = {
+        id: translation.id,
+        providerBacked: translation.provider !== "mock",
+        fallback: translation.fallback || refinement.fallback,
+        error: translation.error ?? refinement.error,
+        audioEvidenceEndAtMs: translation.audioEvidenceEndAtMs,
+        asrReceivedAtMs: translation.asrReceivedAtMs,
+        translationEligibleAtMs: translation.translationEligibleAtMs,
+        translationRequestedAtMs: translation.translationRequestedAtMs,
+        firstDraftReceivedAtMs: translation.firstDraftReceivedAtMs,
+        firstDraftVisibleAtMs: translation.firstDraftVisibleAtMs,
+        finalVisibleAtMs: translation.finalVisibleAtMs,
+        refinementVisibleAtMs: refinement.refinementVisibleAtMs
+      };
+      latencyAggregatorRef.current.record(latencySample);
+      referenceLatencyRunnerRef.current.recordSample(latencySample);
+    });
+    updateInternalDiagnostics();
+
+    setRefinementEvents((current) => [...visibleRefinements, ...current].slice(0, 8));
+    const { segments: nextSegments } = reconcileSubtitleSegments({
+      current: subtitleSegmentsRef.current,
+      translationEvents: [],
+      refinementEvents: visibleRefinements,
+      asrSegments: changedSegments,
+      revisionWindow: RECENT_REVISION_WINDOW,
+      providerConnectionState: providerHealthRef.current?.session.state
+    });
+    commitSubtitleSegments(nextSegments);
+    syncCaptionCueSnapshot(changedSegments, nextTranslationEvents, visibleRefinements);
   }
 
   function publishProviderTranscript(text: string, latencyMs: number): void {
@@ -870,6 +1259,9 @@ export function App() {
           status: "final",
           revision: 1,
           receivedAtMs: now,
+          audioEvidenceEndAtMs: Math.max(0, now - (index === 0 ? latencyMs : 180)),
+          asrReceivedAtMs: now,
+          timingCorrelation: "segment-revision",
           latencyMs: index === 0 ? latencyMs : 180
         };
         const asrSegment: AsrSegment = {
@@ -880,6 +1272,9 @@ export function App() {
           startedAtMs: asrEvent.audioStartMs,
           endedAtMs: asrEvent.audioEndMs,
           updatedAtMs: now,
+          audioEvidenceEndAtMs: asrEvent.audioEvidenceEndAtMs,
+          asrReceivedAtMs: asrEvent.asrReceivedAtMs,
+          timingCorrelation: asrEvent.timingCorrelation,
           latencyMs: asrEvent.latencyMs,
           revision: 1
         };
@@ -912,25 +1307,34 @@ export function App() {
 
   function resetAsrState(): void {
     asrClientRef.current.reset();
+    providerAsrEventDeduplicatorRef.current.reset();
+    translationSchedulerRef.current.reset();
+    refinementSchedulerRef.current.reset();
+    latencyAggregatorRef.current.reset();
+    referenceLatencyRunnerRef.current.reset();
     setAsrEvents([]);
     setAsrSegments([]);
     setTranslationEvents([]);
+    setRefinementEvents([]);
     setSubtitleSegments([]);
+    setCaptionCueSnapshot(emptyCaptionCueSnapshot);
     subtitleSegmentsRef.current = [];
+    captionCueSnapshotRef.current = emptyCaptionCueSnapshot;
     clearTtsQueue();
   }
 
   function updateLanguagePair(pairId: string): void {
     const nextPair = getLanguagePair(pairId);
+    captureSessionIdRef.current = null;
+    captureEpochRef.current = 0;
     setActiveLanguagePair(nextPair);
     resetAsrState();
   }
 
   function resetInputState(type: AudioSourceType): void {
     chunkSequenceRef.current = 0;
-    payloadQueueRef.current = [];
+    payloadQueueRef.current.reset();
     payloadQueueStateRef.current = initialQueueState;
-    setRecentChunks([]);
     resetAsrState();
     setSession((current) => ({
       ...current,
@@ -950,9 +1354,11 @@ export function App() {
       captureTimerRef.current = null;
     }
 
+    audioProcessorRef.current?.disconnect();
+    audioProcessorRef.current = null;
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
     mediaStreamRef.current = null;
-    payloadQueueRef.current = [];
+    payloadQueueRef.current.reset();
     payloadQueueStateRef.current = initialQueueState;
 
     void audioContextRef.current?.close();
@@ -962,6 +1368,8 @@ export function App() {
   function updateSourceType(type: AudioSourceType): void {
     cleanupActiveCapture();
     void stopRealtimeProviderShell();
+    captureSessionIdRef.current = null;
+    captureEpochRef.current = 0;
     resetInputState(type);
 
     if (type === "microphone" && microphoneDevices.length === 0) {
@@ -973,7 +1381,7 @@ export function App() {
     }
   }
 
-  async function refreshDesktopAudioSources(): Promise<void> {
+  async function refreshDesktopAudioSources(): Promise<DesktopAudioSource[]> {
     if (!appInfo?.listDesktopAudioSources) {
       setSession((current) => ({
         ...current,
@@ -981,19 +1389,22 @@ export function App() {
         status: "error",
         error: "当前运行环境无法枚举桌面音频源。"
       }));
-      return;
+      return [];
     }
 
     try {
       const sources = await appInfo.listDesktopAudioSources();
       setDesktopSources(sources);
-      setSelectedDesktopSourceId((current) => current || sources[0]?.id || "");
+      setSelectedDesktopSourceId((current) =>
+        sources.some((source) => source.id === current) ? current : sources[0]?.id || ""
+      );
       setSession((current) => ({
         ...current,
         sourceType: "system",
         status: sources.length > 0 ? "ready" : "error",
         error: sources.length > 0 ? null : "没有发现可用的桌面或窗口来源。"
       }));
+      return sources;
     } catch (error) {
       setSession((current) => ({
         ...current,
@@ -1001,6 +1412,7 @@ export function App() {
         status: "error",
         error: error instanceof Error ? error.message : "桌面音频源枚举失败。"
       }));
+      return [];
     }
   }
 
@@ -1052,13 +1464,27 @@ export function App() {
     const audioContext = new AudioContext({ sampleRate: 16000 });
     const source = audioContext.createMediaStreamSource(stream);
     const analyser = audioContext.createAnalyser();
+    const processor = audioContext.createScriptProcessor(4096, 1, 1);
+    const pcmBuffer: number[] = [];
+    const samplesPerChunk = Math.round(
+      (audioContext.sampleRate * realtimeLatencyTuning.audioChunkDurationMs) / 1000
+    );
     analyser.fftSize = 1024;
     source.connect(analyser);
+    source.connect(processor);
+    processor.connect(audioContext.destination);
+    processor.onaudioprocess = (event) => {
+      const input = event.inputBuffer.getChannelData(0);
+      input.forEach((sample) => {
+        pcmBuffer.push(sample);
+      });
+    };
 
     mediaStreamRef.current = stream;
     audioContextRef.current = audioContext;
+    audioProcessorRef.current = processor;
 
-    payloadQueueRef.current = [];
+    payloadQueueRef.current.reset();
     payloadQueueStateRef.current = initialQueueState;
     setSession((current) => ({
       ...current,
@@ -1073,19 +1499,33 @@ export function App() {
 
     captureTimerRef.current = window.setInterval(() => {
       const snapshot = getAnalyserSnapshot(analyser);
-      const payload = createPcm16PayloadFromTimeDomainSamples(
-        snapshot.samples,
-        audioContext.sampleRate,
-        1,
-        500
-      );
+      const floatSamples =
+        pcmBuffer.length >= samplesPerChunk
+          ? new Float32Array(pcmBuffer.splice(0, samplesPerChunk))
+          : new Float32Array(0);
+      const payload =
+        floatSamples.length > 0
+          ? createPcm16PayloadFromFloatSamples(
+              floatSamples,
+              audioContext.sampleRate,
+              1,
+              realtimeLatencyTuning.audioChunkDurationMs
+            )
+          : createPcm16PayloadFromTimeDomainSamples(
+              snapshot.samples,
+              audioContext.sampleRate,
+              1,
+              realtimeLatencyTuning.audioChunkDurationMs
+            );
+      const volume =
+        floatSamples.length > 0 ? getVolumeFromFloatSamples(floatSamples) : snapshot.volume;
       const chunk =
         sourceType === "microphone"
-          ? createCapturedMicrophoneChunk(chunkSequenceRef.current, snapshot.volume, sourceLabel, payload)
-          : createCapturedSystemAudioChunk(chunkSequenceRef.current, snapshot.volume, sourceLabel, payload);
+          ? createCapturedMicrophoneChunk(chunkSequenceRef.current, volume, sourceLabel, payload)
+          : createCapturedSystemAudioChunk(chunkSequenceRef.current, volume, sourceLabel, payload);
       chunkSequenceRef.current += 1;
       recordChunk(chunk);
-    }, 500);
+    }, realtimeLatencyTuning.audioChunkDurationMs);
   }
 
   async function startMicrophoneCapture(): Promise<void> {
@@ -1101,7 +1541,6 @@ export function App() {
     try {
       cleanupActiveCapture();
       chunkSequenceRef.current = 0;
-      setRecentChunks([]);
       resetAsrState();
       await startRealtimeProviderShell("microphone");
 
@@ -1135,7 +1574,14 @@ export function App() {
   }
 
   async function startSystemAudioCapture(): Promise<void> {
-    const sourceId = selectedDesktopSourceId || desktopSources[0]?.id;
+    let availableSources = desktopSources;
+    let sourceId = selectedDesktopSourceId || availableSources[0]?.id;
+
+    if (!sourceId) {
+      availableSources = await refreshDesktopAudioSources();
+      sourceId = availableSources[0]?.id;
+    }
+
     if (!sourceId) {
       setSession((current) => ({
         ...current,
@@ -1149,7 +1595,6 @@ export function App() {
     try {
       cleanupActiveCapture();
       chunkSequenceRef.current = 0;
-      setRecentChunks([]);
       resetAsrState();
       await startRealtimeProviderShell("system");
 
@@ -1167,7 +1612,10 @@ export function App() {
       stream.getVideoTracks().forEach((track) => {
         track.enabled = false;
       });
-      startAnalyserCapture(stream, "system", selectedDesktopSourceName);
+      const sourceName =
+        availableSources.find((source) => source.id === sourceId)?.name ??
+        selectedDesktopSourceName;
+      startAnalyserCapture(stream, "system", sourceName);
     } catch (error) {
       cleanupActiveCapture();
       void stopRealtimeProviderShell();
@@ -1203,9 +1651,10 @@ export function App() {
     }
 
     chunkSequenceRef.current = 0;
-    payloadQueueRef.current = [];
+    payloadQueueRef.current.reset();
     payloadQueueStateRef.current = initialQueueState;
-    setRecentChunks([]);
+    captureSessionIdRef.current = null;
+    captureEpochRef.current = 0;
     resetAsrState();
     setSession((current) => ({
       ...current,
@@ -1221,6 +1670,12 @@ export function App() {
   }
 
   async function startSession(): Promise<void> {
+    if (captureSessionIdRef.current) {
+      captureEpochRef.current += 1;
+    } else {
+      captureSessionIdRef.current = createCaptureSessionId();
+      captureEpochRef.current = 0;
+    }
     if (
       session.sourceType === "file" &&
       aiRuntimeConfig?.provider === "openai" &&
@@ -1289,7 +1744,7 @@ export function App() {
     }
 
     resetAsrState();
-    payloadQueueRef.current = [];
+    payloadQueueRef.current.reset();
     payloadQueueStateRef.current = initialQueueState;
     setSession((current) => ({
       ...current,
@@ -1317,23 +1772,10 @@ export function App() {
     }
   }
 
-  function pauseSession(): void {
-    if (session.sourceType === "microphone" || session.sourceType === "system") {
-      cleanupActiveCapture();
-      void stopRealtimeProviderShell();
-    }
-
-    setSession((current) => ({
-      ...current,
-      status: current.status === "streaming" ? "paused" : current.status,
-      volume: current.status === "streaming" ? 0 : current.volume
-    }));
-  }
-
   function stopSession(): void {
     cleanupActiveCapture();
     void stopRealtimeProviderShell();
-    payloadQueueRef.current = [];
+    payloadQueueRef.current.reset();
     payloadQueueStateRef.current = initialQueueState;
     setSession((current) => ({
       ...current,
@@ -1347,7 +1789,7 @@ export function App() {
   function retryCurrentSource(): void {
     cleanupActiveCapture();
     void stopRealtimeProviderShell();
-    payloadQueueRef.current = [];
+    payloadQueueRef.current.reset();
     payloadQueueStateRef.current = initialQueueState;
     setSession((current) => ({
       ...current,
@@ -1359,16 +1801,6 @@ export function App() {
     window.setTimeout(() => {
       void startSession();
     }, 0);
-  }
-
-  function switchToFallbackSource(): void {
-    const fallbackSource =
-      session.sourceType === "system"
-        ? "microphone"
-        : session.sourceType === "microphone"
-          ? "file"
-          : "microphone";
-    updateSourceType(fallbackSource);
   }
 
   function setTtsEnabled(enabled: boolean): void {
@@ -1502,537 +1934,261 @@ export function App() {
     setFloatingCaptionVisible(Boolean(result?.visible));
   }
 
-  function updateFloatingLayout(layout: FloatingCaptionLayout): void {
-    setFloatingLayout(layout);
-    if (floatingCaptionVisible) {
-      void appInfo?.configureFloatingCaption?.({
-        layout,
-        position: floatingPosition
-      });
+  async function copyHistory(): Promise<void> {
+    historyWriterRef.current?.flush();
+    const content = serializeHistoryText(groupHistoryRecords(historyRecordsRef.current));
+    if (!content) return;
+
+    try {
+      await navigator.clipboard.writeText(content);
+      setHistoryMessage("历史已复制。");
+    } catch {
+      setHistoryMessage("复制失败，请检查剪贴板权限。");
     }
   }
 
-  function updateFloatingPosition(position: FloatingCaptionPosition): void {
-    setFloatingPosition(position);
-    if (floatingCaptionVisible) {
-      void appInfo?.configureFloatingCaption?.({
-        layout: floatingLayout,
-        position
-      });
+  async function exportHistory(): Promise<void> {
+    historyWriterRef.current?.flush();
+    const content = serializeHistoryText(groupHistoryRecords(historyRecordsRef.current));
+    if (!content || !appInfo?.exportSubtitleHistory) return;
+
+    try {
+      const saved = await appInfo.exportSubtitleHistory(
+        content,
+        `同声传译字幕-${new Date().toISOString().slice(0, 10)}.txt`
+      );
+      if (saved) setHistoryMessage("历史已导出。");
+    } catch {
+      setHistoryMessage("导出失败，请重新选择保存位置。");
     }
   }
 
-  const translationProviderLabel = latestTranslationEvent
-    ? `${latestTranslationEvent.provider}/${latestTranslationEvent.model}${
-        latestTranslationEvent.fallback ? " fallback" : ""
-      }`
-    : providerHealth
-      ? `${providerHealth.config.translationProvider}/${providerHealth.config.translationModel}`
-      : "检测中";
-  const latestRevisionLabel = latestSubtitleSegment
-    ? `${latestSubtitleSegment.revision} · ${getRevisionProvenanceLabel(
-        latestSubtitleSegment.revisionProvenance
-      )}`
-    : "等待字幕";
+  function removeHistory(): void {
+    historyWriterRef.current?.flush();
+    try {
+      clearHistory(window.localStorage);
+    } catch {
+      setHistoryMessage("历史暂时无法清空。");
+      return;
+    }
+    historyRecordsRef.current = [];
+    setHistoryRecords([]);
+    setConfirmingClearHistory(false);
+    setHistoryMessage("历史已清空。");
+  }
 
-  const metrics = [
-    { label: "音频源", value: getSourceLabel(session.sourceType) },
-    { label: "输入状态", value: liveExperience.label },
-    { label: "音频块", value: String(session.chunksProduced) },
-    { label: "ASR", value: providerHealth?.config.asrModel ?? `${asrConfig.provider}/${asrConfig.model}` },
-    { label: "翻译模型", value: translationProviderLabel },
-    { label: "Provider", value: getProviderModeLabel(providerHealth) },
-    {
-      label: "API Key",
-      value: getProviderKeyLabel(providerHealth)
-    },
-    {
-      label: "ASR延迟",
-      value: latestSubtitleSegment
-        ? `${latestSubtitleSegment.asrLatencyMs} ms`
-        : latestAsrEvent
-          ? `${latestAsrEvent.latencyMs} ms`
-          : "等待字幕"
-    },
-    {
-      label: "翻译延迟",
-      value: latestSubtitleSegment
-        ? `${latestSubtitleSegment.translationLatencyMs} ms`
-        : latestTranslationEvent
-          ? `${latestTranslationEvent.latencyMs} ms`
-          : "等待译文"
-    },
-    {
-      label: "字幕延迟",
-      value: latestSubtitleSegment
-        ? `${latestSubtitleSegment.totalLatencyMs} ms`
-        : latestAsrEvent
-          ? `${latestAsrEvent.latencyMs} ms`
-          : "等待字幕"
-    },
-    { label: "音量", value: `${Math.round(session.volume * 100)}%` },
-    { label: "系统捕获", value: getNativeAudioCapabilityLabel(nativeAudioCapability) },
-    {
-      label: "Payload",
-      value: session.lastChunk?.payloadMetadata.available
-        ? `${session.lastChunk.payloadMetadata.sampleFormat}/${session.lastChunk.payloadMetadata.byteLength} B`
-        : "metadata-only"
-    },
-    {
-      label: "队列",
-      value: `${session.queue.depth}/${session.queue.maxDepth} · 丢弃 ${session.queue.dropped}`
-    },
-    {
-      label: "服务状态",
-      value: getProviderConnectionLabel(providerHealth?.session.state)
-    },
-    { label: "恢复建议", value: liveExperience.recoveryAction },
-    { label: "修订窗口", value: `${RECENT_REVISION_WINDOW} 条` },
-    { label: "最近修订", value: latestRevisionLabel },
-    { label: "悬浮窗", value: floatingCaptionVisible ? "已打开" : "未打开" },
-    { label: "语音播报", value: getTtsStatusLabel(ttsSession.status) },
-    { label: "语言方向", value: activeLanguagePair.label }
-  ];
+  function unlockFloatingCaption(): void {
+    floatingCaptionStateRef.current = {
+      ...floatingCaptionStateRef.current,
+      locked: false,
+      mousePassthrough: false
+    };
+    void appInfo?.setFloatingCaptionInteraction?.({ locked: false, mousePassthrough: false });
+    appInfo?.updateFloatingCaption?.(floatingCaptionStateRef.current);
+  }
+
+  const activeSourceText = activeCue?.sourceText ?? latestAsrSegment?.text ?? selectedSource.description;
+  const activeTranslatedText =
+    activeCue?.translatedText ||
+    (activeCue?.sourceText || latestAsrSegment
+      ? "正在生成译文"
+      : session.sourceType === "system"
+        ? `当前来源：${selectedDesktopSourceName}`
+        : session.sourceType === "microphone"
+          ? `当前设备：${selectedMicrophoneLabel}`
+          : session.selectedFile
+            ? `已选择 ${session.selectedFile.name}`
+            : "选择来源后点击开始同传");
 
   return (
-    <main className="app-shell" aria-labelledby="app-title">
-      <header className="top-bar" aria-label="同声传译控制区">
-        <div className="brand-block">
-          <p className="eyebrow">桌面 AI 同传助手</p>
-          <h1 id="app-title">声桥 LinguaBridge</h1>
-        </div>
-
-        <form className="control-cluster" aria-label="会话配置">
-          <label>
-            <span>音频源</span>
-            <select
-              value={session.sourceType}
-              aria-label="选择音频源"
-              onChange={(event) => updateSourceType(event.target.value as AudioSourceType)}
-            >
-              {sourceOptions.map((option) => (
-                <option key={option.type} value={option.type}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <label>
-            <span>语言方向</span>
-            <select
-              value={activeLanguagePair.id}
-              aria-label="选择语言方向"
-              onChange={(event) => updateLanguagePair(event.target.value)}
-            >
-              {supportedLanguagePairs.map((pair) => (
-                <option key={pair.id} value={pair.id}>
-                  {pair.label}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <button type="button" className="primary-action" onClick={() => void startSession()}>
-            开始
-          </button>
-          <button type="button" className="secondary-action" onClick={pauseSession}>
-            暂停
-          </button>
-          <button
-            type="button"
-            className="secondary-action"
-            disabled={!liveExperience.canStop}
-            onClick={stopSession}
-          >
-            停止
-          </button>
-          <button
-            type="button"
-            className="secondary-action"
-            disabled={!liveExperience.canRetry}
-            onClick={retryCurrentSource}
-          >
-            重试
-          </button>
-        </form>
+    <main className={`lite-shell theme-${theme} font-${fontSize}`} aria-label="同声传译">
+      <header className="compact-toolbar">
+        <select
+          className="language-select"
+          value={activeLanguagePair.id}
+          aria-label="选择语言方向"
+          onChange={(event) => updateLanguagePair(event.target.value)}
+        >
+          {supportedLanguagePairs.map((pair) => (
+            <option key={pair.id} value={pair.id}>{pair.label}</option>
+          ))}
+        </select>
+        <button type="button" className="primary-action compact-primary" onClick={primarySessionAction}>
+          {isSessionRunning ? "暂停" : session.status === "stopped" ? "继续" : "开始"}
+        </button>
+        <button
+          type="button"
+          className={`icon-button ${historyExpanded ? "icon-button-active" : ""}`}
+          aria-label={historyExpanded ? "收起字幕历史" : "展开字幕历史"}
+          title={historyExpanded ? "收起字幕历史" : "字幕历史"}
+          aria-expanded={historyExpanded}
+          onClick={() => {
+            setHistoryExpanded((value) => !value);
+            setSettingsOpen(false);
+          }}
+        >
+          <History size={19} aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          className={`icon-button ${settingsOpen ? "icon-button-active" : ""}`}
+          aria-label={settingsOpen ? "关闭设置" : "打开设置"}
+          title="设置"
+          aria-expanded={settingsOpen}
+          onClick={() => setSettingsOpen((value) => !value)}
+        >
+          <Settings size={19} aria-hidden="true" />
+        </button>
       </header>
 
-      <section className="workspace-grid" aria-label="同传工作台">
-        <section className="live-panel" aria-labelledby="live-caption-title">
-          <div className="section-heading">
-            <div>
-              <p className="section-kicker">实时输入</p>
-              <h2 id="live-caption-title">{selectedSource.label}</h2>
-            </div>
-            <span className={`status-pill status-${liveExperience.phase}`}>
-              {liveExperience.label}
-            </span>
+      {settingsOpen ? (
+        <section className="settings-popover" aria-label="设置">
+          <div className="settings-heading">
+            <h2>设置</h2>
+            <button type="button" className="icon-button" aria-label="关闭设置" title="关闭" onClick={() => setSettingsOpen(false)}>
+              <X size={18} aria-hidden="true" />
+            </button>
           </div>
+          <div className="settings-grid">
+            <label className="setting-field">
+              <span>音频源</span>
+              <select value={session.sourceType} onChange={(event) => updateSourceType(event.target.value as AudioSourceType)}>
+                {sourceOptions.map((option) => <option key={option.type} value={option.type}>{option.label}</option>)}
+              </select>
+            </label>
 
-          <div className={`caption-stage caption-${liveExperience.severity}`} aria-live="polite">
-            <p className="source-caption">
-              {latestSubtitleSegment
-                ? latestSubtitleSegment.sourceText
-                : latestAsrSegment
-                  ? latestAsrSegment.text
-                : selectedSource.description}
-            </p>
-            <p
-              className={`translated-caption ${
-                latestSubtitleSegment?.revised ? "caption-revised" : ""
-              }`}
-            >
-              {latestSubtitleSegment
-                ? latestSubtitleSegment.translatedText
-                : latestAsrSegment
-                  ? "正在等待稳定片段生成译文"
-                : session.sourceType === "system"
-                  ? `当前来源：${selectedDesktopSourceName}`
-                  : session.sourceType === "microphone"
-                    ? `当前设备：${selectedMicrophoneLabel}`
-                    : session.selectedFile
-                      ? `已选择 ${session.selectedFile.name}`
-                      : "选择音频源后，可先用文件模拟、麦克风或系统音频验证实时输入链路。"}
-            </p>
-            {latestSubtitleSegment || latestAsrSegment ? (
-              <div className="asr-detail-row" aria-label="识别事件状态">
-                <span>
-                  {latestSubtitleSegment
-                    ? latestSubtitleSegment.status === "partial"
-                      ? "Partial"
-                      : latestSubtitleSegment.revised
-                        ? "已修订"
-                        : "Translated"
-                    : "ASR"}
-                </span>
-                <span>
-                  {latestSubtitleSegment
-                    ? `${latestSubtitleSegment.sourceLanguage} -> ${latestSubtitleSegment.targetLanguage}`
-                    : latestAsrSegment?.status === "final"
-                      ? "Final"
-                      : "Partial"}
-                </span>
-                <span>
-                  片段{" "}
-                  {(latestSubtitleSegment?.id ?? latestAsrSegment?.id ?? "").replace(
-                    "asr-segment-",
-                    "#"
-                  )}
-                </span>
-                <span>
-                  {latestSubtitleSegment
-                    ? `版本 ${latestSubtitleSegment.revision}`
-                    : `${latestAsrSegment?.latencyMs ?? 0} ms`}
-                </span>
-                {latestSubtitleSegment ? (
-                  <span>{latestSubtitleSegment.totalLatencyMs} ms</span>
-                ) : null}
-                {latestSubtitleSegment && latestTranslationEvent ? (
-                  <span>
-                    {latestTranslationEvent.provider}/{latestTranslationEvent.model}
-                  </span>
-                ) : null}
-                {latestSubtitleSegment && latestTranslationEvent?.fallback ? (
-                  <span>源文保留</span>
-                ) : null}
+            {session.sourceType === "system" ? (
+              <label className="setting-field setting-field-wide">
+                <span>桌面来源</span>
+                <div className="setting-inline">
+                  <select value={selectedDesktopSourceId} onChange={(event) => setSelectedDesktopSourceId(event.target.value)}>
+                    {desktopSources.length === 0 ? <option value="">默认桌面源</option> : desktopSources.map((source) => <option key={source.id} value={source.id}>{source.name}</option>)}
+                  </select>
+                  <button type="button" className="text-button" onClick={() => void refreshDesktopAudioSources()}>刷新</button>
+                </div>
+              </label>
+            ) : null}
+
+            {session.sourceType === "microphone" ? (
+              <label className="setting-field setting-field-wide">
+                <span>麦克风</span>
+                <div className="setting-inline">
+                  <select value={selectedMicrophoneId} onChange={(event) => setSelectedMicrophoneId(event.target.value)}>
+                    {microphoneDevices.length === 0 ? <option value="">默认麦克风</option> : microphoneDevices.map((device) => <option key={device.deviceId} value={device.deviceId}>{device.label}</option>)}
+                  </select>
+                  <button type="button" className="text-button" onClick={() => void refreshMicrophoneDevices()}>刷新</button>
+                </div>
+              </label>
+            ) : null}
+
+            {session.sourceType === "file" ? (
+              <div className="setting-field setting-field-wide">
+                <span>本地文件</span>
+                <button type="button" className="file-picker" onClick={selectLocalFile}>
+                  <MonitorUp size={17} aria-hidden="true" />
+                  <span>{session.selectedFile?.name ?? "选择音频或视频文件"}</span>
+                </button>
               </div>
             ) : null}
-            {session.error ? <p className="error-message">{session.error}</p> : null}
-            <div className={`recovery-banner recovery-${liveExperience.severity}`}>
-              <div>
-                <span>{liveExperience.compactLabel}</span>
-                <strong>{liveExperience.detail}</strong>
-              </div>
-              <p>{liveExperience.recoveryAction}</p>
-            </div>
-          </div>
 
-          <div className="recovery-actions" aria-label="恢复操作">
-            <button
-              type="button"
-              className="secondary-action"
-              disabled={!liveExperience.canRetry}
-              onClick={retryCurrentSource}
-            >
-              重试当前来源
-            </button>
-            <button
-              type="button"
-              className="secondary-action"
-              disabled={!liveExperience.canStop}
-              onClick={stopSession}
-            >
-              停止输入
-            </button>
-            <button
-              type="button"
-              className="secondary-action"
-              disabled={!liveExperience.canUseFallback}
-              onClick={switchToFallbackSource}
-            >
-              切换备用输入
-            </button>
-          </div>
-
-          <div className="source-actions" aria-label="音频源操作">
-            {session.sourceType === "system" ? (
-              <>
-                <button
-                  type="button"
-                  className="secondary-action"
-                  onClick={() => void refreshDesktopAudioSources()}
-                >
-                  刷新来源
-                </button>
-                <select
-                  className="inline-select"
-                  value={selectedDesktopSourceId}
-                  aria-label="选择桌面或窗口来源"
-                  onChange={(event) => setSelectedDesktopSourceId(event.target.value)}
-                >
-                  {desktopSources.length === 0 ? (
-                    <option value="">默认桌面源</option>
-                  ) : (
-                    desktopSources.map((source) => (
-                      <option key={source.id} value={source.id}>
-                        {source.name}
-                      </option>
-                    ))
-                  )}
-                </select>
-              </>
-            ) : session.sourceType === "microphone" ? (
-              <>
-                <button
-                  type="button"
-                  className="secondary-action"
-                  onClick={() => void refreshMicrophoneDevices()}
-                >
-                  刷新麦克风
-                </button>
-                <select
-                  className="inline-select"
-                  value={selectedMicrophoneId}
-                  aria-label="选择麦克风设备"
-                  onChange={(event) => setSelectedMicrophoneId(event.target.value)}
-                >
-                  {microphoneDevices.length === 0 ? (
-                    <option value="">默认麦克风</option>
-                  ) : (
-                    microphoneDevices.map((device) => (
-                      <option key={device.deviceId} value={device.deviceId}>
-                        {device.label}
-                      </option>
-                    ))
-                  )}
-                </select>
-              </>
-            ) : (
-              <button type="button" className="secondary-action" onClick={selectLocalFile}>
-                选择本地文件
-              </button>
-            )}
-            <div className="volume-meter" aria-label="音量活动">
-              <span style={{ width: `${Math.round(session.volume * 100)}%` }} />
-            </div>
-          </div>
-
-          {session.sourceType === "system" && nativeAudioCapability ? (
-            <div
-              className={`capture-capability capture-${nativeAudioCapability.status}`}
-              aria-label="系统音频捕获能力"
-            >
-              <div>
-                <span>{getNativeAudioCapabilityLabel(nativeAudioCapability)}</span>
-                <strong>{nativeAudioCapability.strategy}</strong>
-              </div>
-              <p>{nativeAudioCapability.notes[0]}</p>
-              <p>
-                fallback: {nativeAudioCapability.fallback} · {nativeAudioCapability.sampleRate} Hz ·{" "}
-                {nativeAudioCapability.chunkDurationMs} ms
-              </p>
-              <p>{nativeAudioCapability.nextStep}</p>
-            </div>
-          ) : null}
-
-          {providerHealth ? (
-            <div
-              className={`provider-health provider-${providerHealth.session.state}`}
-              aria-label="实时服务状态"
-            >
-              <div>
-                <span>{getProviderConnectionLabel(providerHealth.session.state)}</span>
-                <strong>{getProviderModeLabel(providerHealth)}</strong>
-              </div>
-              <p>
-                ASR: {providerHealth.config.asrModel} · 翻译: {providerHealth.config.translationModel}
-              </p>
-              <p>
-                队列: {providerHealth.session.queue.depth}/{providerHealth.session.queue.maxDepth} ·
-                丢弃 {providerHealth.session.queue.dropped}
-              </p>
-              <p>{providerHealth.session.error ?? getProviderKeyLabel(providerHealth)}</p>
-            </div>
-          ) : null}
-
-          <div className="floating-controls" aria-label="悬浮字幕控制">
-            <button
-              type="button"
-              className="secondary-action"
-              onClick={() => void openFloatingCaption()}
-            >
-              打开悬浮字幕
-            </button>
-            <button
-              type="button"
-              className="secondary-action"
-              onClick={() => void closeFloatingCaption()}
-            >
-              关闭悬浮字幕
-            </button>
-            <select
-              className="inline-select"
-              value={floatingLayout}
-              aria-label="悬浮字幕尺寸"
-              onChange={(event) => updateFloatingLayout(event.target.value as FloatingCaptionLayout)}
-            >
-              <option value="compact">紧凑</option>
-              <option value="standard">标准</option>
-              <option value="wide">宽屏</option>
-            </select>
-            <select
-              className="inline-select"
-              value={floatingPosition}
-              aria-label="悬浮字幕位置"
-              onChange={(event) =>
-                updateFloatingPosition(event.target.value as FloatingCaptionPosition)
-              }
-            >
-              <option value="top-left">左上</option>
-              <option value="top-right">右上</option>
-              <option value="bottom-left">左下</option>
-              <option value="bottom-right">右下</option>
-            </select>
-          </div>
-
-          <div className="tts-controls" aria-label="语音播报控制">
-            <label className="tts-toggle">
-              <input
-                type="checkbox"
-                checked={ttsSession.enabled}
-                onChange={(event) => setTtsEnabled(event.target.checked)}
-              />
-              <span>译文播报</span>
+            <label className="setting-field">
+              <span>字号</span>
+              <select value={fontSize} onChange={(event) => setFontSize(event.target.value as UiFontSize)}>
+                <option value="small">小</option>
+                <option value="medium">中</option>
+                <option value="large">大</option>
+              </select>
             </label>
-            <button type="button" className="secondary-action" onClick={pauseTts}>
-              {ttsSession.status === "paused" ? "继续播报" : "暂停播报"}
-            </button>
-            <button type="button" className="secondary-action" onClick={clearTtsQueue}>
-              停止播报
-            </button>
-            <div className={`tts-status tts-${ttsSession.status}`}>
-              <span>{getTtsStatusLabel(ttsSession.status)}</span>
-              <strong>
-                {ttsSession.currentItem?.label ??
-                  (ttsSession.queue.length > 0
-                    ? `队列 ${ttsSession.queue.length} 条`
-                    : "暂无队列")}
-              </strong>
-            </div>
-          </div>
-          {ttsSession.error ? <p className="error-message">{ttsSession.error}</p> : null}
+            <label className="setting-field">
+              <span>主题</span>
+              <select value={theme} onChange={(event) => setTheme(event.target.value as UiTheme)}>
+                <option value="system">跟随系统</option>
+                <option value="light">浅色</option>
+                <option value="dark">深色</option>
+              </select>
+            </label>
 
-          <div className="placeholder-row" aria-label="输入源状态">
-            <span>
-              {session.lastChunk?.payloadMetadata.available
-                ? `Payload：${session.lastChunk.payloadMetadata.sampleFormat} · ${session.lastChunk.payloadMetadata.frameCount} frames`
-                : "统一音频块：16 kHz / mono / 500 ms"}
-            </span>
-            <span>
-              {session.sourceType === "system"
-                ? selectedDesktopSourceName
-                : session.sourceType === "microphone"
-                  ? selectedMicrophoneLabel
-                  : session.selectedFile
-                    ? `${session.selectedFile.extension.toUpperCase()} · ${formatFileSize(
-                        session.selectedFile.size
-                      )}`
-                    : "尚未选择文件"}
-            </span>
-            <span>
-              {session.lastChunk
-                ? `最近时间戳 ${formatTimestamp(session.lastChunk.timestampMs)} · ${
-                    session.lastChunk.payloadMetadata.providerReady ? "provider-ready" : "metadata-only"
-                  }`
-                : "等待首个音频块"}
-            </span>
+            <label className="toggle-row">
+              <span>悬浮字幕</span>
+              <input type="checkbox" checked={floatingCaptionVisible} onChange={() => void (floatingCaptionVisible ? closeFloatingCaption() : openFloatingCaption())} />
+            </label>
+            <label className="toggle-row">
+              <span>译文播报</span>
+              <input type="checkbox" checked={ttsSession.enabled} onChange={(event) => setTtsEnabled(event.target.checked)} />
+            </label>
           </div>
+          <div className="settings-secondary-actions">
+            <button type="button" className="text-button" onClick={unlockFloatingCaption}>解锁字幕</button>
+            <button type="button" className="text-button" onClick={() => void appInfo?.resetFloatingCaption?.()}>重置位置</button>
+            {ttsSession.enabled ? <button type="button" className="text-button" onClick={pauseTts}>{ttsSession.status === "paused" ? "继续播报" : "暂停播报"}</button> : null}
+            {ttsSession.enabled ? <button type="button" className="text-button" onClick={clearTtsQueue}>停止播报</button> : null}
+          </div>
+          {ttsSession.error ? <p className="inline-error">{ttsSession.error}</p> : null}
         </section>
+      ) : null}
 
-        <aside className="history-panel" aria-labelledby="history-title">
-          <div className="section-heading compact">
-            <div>
-              <p className="section-kicker">Chunks</p>
-              <h2 id="history-title">字幕记录</h2>
-            </div>
-            <span className="small-version">v{appInfo?.version ?? "0.1.0"}</span>
+      <section className="caption-stage" aria-live="polite" aria-label="当前字幕">
+        <div className="recent-context" aria-label="最近上下文">
+          {recentContextGroups.map((group) => (
+            <p key={group.id}>{group.translatedText || group.sourceText}</p>
+          ))}
+        </div>
+        <div className="current-caption">
+          <div className="caption-slot source-caption-slot">
+            <p className="source-caption">{activeSourceText}</p>
           </div>
-
-          <div className="history-list">
-            {subtitleSegments.length === 0 ? (
-              <article className="history-item">
-                <div className="history-meta">
-                  <time>--:--</time>
-                  <span>等待</span>
-                </div>
-                <p className="history-source">暂无译文字幕</p>
-                <p className="history-translation">
-                  稳定原文片段生成后，这里会显示双语字幕和翻译延迟。
-                </p>
-              </article>
-            ) : (
-              subtitleSegments.map((segment) => (
-                <article
-                  className={`history-item ${segment.revised ? "history-item-revised" : ""}`}
-                  key={segment.id}
-                >
-                  <div className="history-meta">
-                    <time>{formatTimestamp(segment.startedAtMs)}</time>
-                    <span>
-                      {segment.revised
-                        ? "已修订"
-                        : segment.status === "partial"
-                          ? "临时字幕"
-                          : `${segment.sourceLanguage} -> ${segment.targetLanguage}`}
-                    </span>
-                  </div>
-                  <p className="history-source">{segment.sourceText}</p>
-                  <p className="history-translation">
-                    {segment.translatedText}
-                  </p>
-                  <p className="history-footnote">
-                    版本 {segment.revision} · {getRevisionReasonLabel(segment.revisionReason)} ·
-                    {getRevisionProvenanceLabel(segment.revisionProvenance)} ·
-                    上下文 {segment.contextSize} · {segment.translationProvider}/
-                    {segment.translationModel} · 延迟 {segment.totalLatencyMs} ms
-                    {segment.translationFallback ? " · 源文兜底" : ""}
-                  </p>
-                </article>
-              ))
-            )}
+          <div className="caption-slot translated-caption-slot">
+            <p className="translated-caption">{activeTranslatedText}</p>
           </div>
-        </aside>
+        </div>
+        {session.error ? <p className="inline-error" role="alert">{session.error}</p> : null}
       </section>
 
-      <footer className="status-strip" aria-label="系统状态">
-        {metrics.map((metric) => (
-          <div className="metric" key={metric.label}>
-            <span>{metric.label}</span>
-            <strong>{metric.value}</strong>
+      {historyExpanded ? (
+        <section className="history-panel" aria-label="字幕历史">
+          <div className="history-toolbar">
+            <div>
+              <h2>字幕历史</h2>
+              <span>{historyGroups.length} 段</span>
+            </div>
+            <div className="history-actions">
+              <button type="button" className="icon-button" aria-label="复制全部历史" title="复制全部" disabled={historyGroups.length === 0} onClick={() => void copyHistory()}><Clipboard size={18} aria-hidden="true" /></button>
+              <button type="button" className="icon-button" aria-label="导出历史为 TXT" title="导出 TXT" disabled={historyGroups.length === 0} onClick={() => void exportHistory()}><Download size={18} aria-hidden="true" /></button>
+              <button type="button" className="icon-button danger-button" aria-label="清空历史" title="清空历史" disabled={historyGroups.length === 0} onClick={() => setConfirmingClearHistory(true)}><Trash2 size={18} aria-hidden="true" /></button>
+              <button type="button" className="icon-button" aria-label="收起字幕历史" title="收起" onClick={() => setHistoryExpanded(false)}><ChevronDown size={19} aria-hidden="true" /></button>
+            </div>
           </div>
-        ))}
-      </footer>
+          {confirmingClearHistory ? (
+            <div className="confirm-strip" role="alert">
+              <span>确认清空全部字幕历史？</span>
+              <button type="button" className="text-button danger-text" onClick={removeHistory}><Check size={15} aria-hidden="true" />确认</button>
+              <button type="button" className="text-button" onClick={() => setConfirmingClearHistory(false)}>取消</button>
+            </div>
+          ) : null}
+          {historyMessage ? <p className="history-message" role="status">{historyMessage}</p> : null}
+          <div className="history-groups">
+            {historyGroups.length === 0 ? (
+              <p className="empty-history">开始同传后，连续内容会整理在这里。</p>
+            ) : historyGroups.slice(0, 10).map((group) => (
+              <article className="history-group" key={group.id}>
+                <div className="history-meta">
+                  <time>{formatTimestamp(group.startedAtMs)}</time>
+                  {group.revised ? <span>已修订</span> : null}
+                </div>
+                <p className="history-source">{group.sourceText}</p>
+                <p className="history-translation">{group.translatedText}</p>
+              </article>
+            ))}
+          </div>
+        </section>
+      ) : (
+        <button type="button" className="history-collapsed-bar" onClick={() => setHistoryExpanded(true)}>
+          <span>字幕历史</span>
+          <span>{historyGroups.length > 0 ? `${historyGroups.length} 段` : ""}</span>
+          <ChevronUp size={18} aria-hidden="true" />
+        </button>
+      )}
     </main>
   );
+
 }

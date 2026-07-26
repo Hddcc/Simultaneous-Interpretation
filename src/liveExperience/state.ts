@@ -57,7 +57,7 @@ function getProviderStateLabel(state: ProviderConnectionState | undefined): stri
   }
 
   if (state === "degraded") {
-    return "实时服务降级运行";
+    return "实时服务受限运行";
   }
 
   if (state === "closing") {
@@ -132,8 +132,8 @@ export function createLiveExperienceState(
     return {
       phase: "degraded",
       severity: "warning",
-      label: "降级运行",
-      compactLabel: "降级",
+      label: "受限运行",
+      compactLabel: "受限",
       detail: "实时队列压力偏高，字幕可能出现延迟或片段丢弃。",
       recoveryAction: "可以继续观察，或停止后重试以恢复低延迟链路。",
       canRetry: true,
