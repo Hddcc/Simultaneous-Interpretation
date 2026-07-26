@@ -64,6 +64,36 @@ assert.equal(revised.active?.translatedText, "你好，世界");
 assert.equal(revised.active?.state, "final");
 assert.equal(revised.active?.revised, true);
 
+const failedTranslation: TranslationEvent = {
+  ...translation("cue-failed", "", 2, 1700),
+  sourceText: "provider returned source text",
+  error: "provider unavailable",
+  fallback: true,
+  failure: {
+    category: "provider",
+    message: "provider unavailable",
+    httpStatus: 503,
+    providerCode: "ServiceUnavailable"
+  }
+};
+const failedWithoutDraft = updateCaptionCueSnapshot({
+  current: emptyCaptionCueSnapshot,
+  asrSegments: [segment("cue-failed", "provider returned source text", 2, 1600)],
+  translationEvents: [failedTranslation],
+  nowMs: 1700
+});
+assert.equal(failedWithoutDraft.active?.translatedText, "");
+assert.equal(failedWithoutDraft.active?.latency.firstDraftVisibleAtMs, null);
+
+const failedAfterDraft = updateCaptionCueSnapshot({
+  current: revised,
+  asrSegments: [segment("cue-1", "hello world corrected", 3, 1800)],
+  translationEvents: [{ ...failedTranslation, segmentId: "cue-1", revision: 3 }],
+  nowMs: 1800
+});
+assert.equal(failedAfterDraft.active?.translatedText, "你好，世界");
+assert.equal(failedAfterDraft.active?.provider.error, "provider unavailable");
+
 const second = updateCaptionCueSnapshot({
   current: revised,
   asrSegments: [segment("cue-2", "next sentence", 1, 2200)],

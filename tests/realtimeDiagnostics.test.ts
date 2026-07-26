@@ -55,6 +55,8 @@ assert.equal(snapshot.provider.queueRatio, 0.25);
 assert.equal(snapshot.provider.uncorrelatedAsrEvents, 2);
 
 const appSource = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
+const electronSource = readFileSync(new URL("../electron/main.ts", import.meta.url), "utf8");
+const historyTypesSource = readFileSync(new URL("../src/history/types.ts", import.meta.url), "utf8");
 const styles = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 for (const existingLabel of ["开始同传", "停止同传", "字幕历史", "悬浮字幕"]) {
   assert.ok(appSource.includes(existingLabel));
@@ -64,5 +66,42 @@ for (const internalLabel of ["追帧状态", "历史补全状态", "P95 延迟",
 }
 assert.equal(styles.includes("catch-up-panel"), false);
 assert.equal(styles.includes("backfill-badge"), false);
+
+const failureSnapshot = createRealtimeDiagnosticsSnapshot({
+  latency: latency.snapshot(),
+  translation: {
+    ...translation.getDiagnostics(),
+    recoveryQueued: 1,
+    recoverySucceeded: 0,
+    recoveryFailed: 1,
+    recoverySkipped: 0,
+    lastFailure: {
+      segmentId: "segment-failed",
+      revision: 2,
+      provider: "aliyun",
+      model: "qwen-plus",
+      category: "provider",
+      message: "Authorization: [redacted]",
+      httpStatus: 429,
+      providerCode: "Throttling",
+      firstFailedAtMs: 1200,
+      lastFailedAtMs: 1500,
+      recoveryAttempted: true,
+      recoveryOutcome: "failed"
+    }
+  },
+  refinement: refinement.getDiagnostics(),
+  nowMs: 2100
+});
+assert.equal(failureSnapshot.translation.lastFailure?.providerCode, "Throttling");
+assert.equal(failureSnapshot.translation.lastFailure?.firstFailedAtMs, 1200);
+assert.equal(failureSnapshot.translation.lastFailure?.lastFailedAtMs, 1500);
+assert.equal(failureSnapshot.translation.lastFailure?.recoveryOutcome, "failed");
+assert.equal(JSON.stringify(failureSnapshot).includes("sk-sensitive-secret"), false);
+assert.equal(electronSource.includes("text: request.text"), false);
+assert.ok(electronSource.includes("Bearer [redacted]"));
+assert.ok(electronSource.includes("Authorization: [redacted]"));
+assert.equal(historyTypesSource.includes("providerCode"), false);
+assert.equal(historyTypesSource.includes("httpStatus"), false);
 
 console.log("realtime diagnostics checks passed");

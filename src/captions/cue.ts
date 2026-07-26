@@ -102,6 +102,7 @@ function applyTranslationLatency(
   translation: TranslationEvent,
   nowMs: number
 ): CaptionCueLatency {
+  const hasVisibleTranslation = !translation.error && Boolean(translation.translatedText.trim());
   const timing = {
     audioEvidenceEndAtMs:
       current.audioEvidenceEndAtMs ?? translation.audioEvidenceEndAtMs ?? null,
@@ -111,10 +112,14 @@ function applyTranslationLatency(
     translationRequestedAtMs:
       current.translationRequestedAtMs ?? translation.translationRequestedAtMs ?? null,
     firstDraftReceivedAtMs:
-      current.firstDraftReceivedAtMs ?? translation.firstDraftReceivedAtMs ?? null,
+      current.firstDraftReceivedAtMs ??
+      (hasVisibleTranslation ? translation.firstDraftReceivedAtMs ?? null : null),
     firstDraftVisibleAtMs:
-      current.firstDraftVisibleAtMs ?? translation.firstDraftVisibleAtMs ?? nowMs,
-    finalVisibleAtMs: translation.finalVisibleAtMs ?? current.finalVisibleAtMs,
+      current.firstDraftVisibleAtMs ??
+      (hasVisibleTranslation ? translation.firstDraftVisibleAtMs ?? nowMs : null),
+    finalVisibleAtMs: hasVisibleTranslation
+      ? translation.finalVisibleAtMs ?? current.finalVisibleAtMs
+      : current.finalVisibleAtMs,
     refinementVisibleAtMs: current.refinementVisibleAtMs
   };
   const metrics = calculateRealtimeLatencies(timing);
@@ -165,7 +170,7 @@ function createCueFromSegment(
   sourceLanguageLabel: string,
   targetLanguageLabel: string
 ): CaptionCue {
-  const translatedText = translation?.translatedText ?? "";
+  const translatedText = translation && !translation.error ? translation.translatedText : "";
   const latency = createEmptyLatency(segment);
 
   if (translation) {
@@ -206,7 +211,10 @@ function reviseCue(
   nowMs: number,
   cueHoldMs: number
 ): CaptionCue {
-  const translatedText = translation?.translatedText ?? existing.translatedText;
+  const translatedText =
+    translation && !translation.error && translation.translatedText.trim()
+      ? translation.translatedText
+      : existing.translatedText;
   const revision = Math.max(existing.revision, segment.revision, translation?.revision ?? 1);
   const asrLatency = segment.latencyMs ?? existing.latency.asrLatencyMs;
   const baseLatency: CaptionCueLatency = {

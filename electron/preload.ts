@@ -2,13 +2,23 @@ import { contextBridge, ipcRenderer } from "electron";
 
 type FloatingCaptionLayout = "compact" | "standard" | "wide";
 type FloatingCaptionPosition = "top-left" | "top-right" | "bottom-left" | "bottom-right";
+type FloatingCaptionBackdrop = "none" | "soft" | "solid";
+type FloatingCaptionCommand = "toggle-session";
 
 interface FloatingCaptionOptions {
   layout: FloatingCaptionLayout;
   position: FloatingCaptionPosition;
 }
 
-interface FloatingCaptionState {
+interface FloatingCaptionPreferences {
+  locked: boolean;
+  mousePassthrough: boolean;
+  backdrop: FloatingCaptionBackdrop;
+  opacity: number;
+  fontScale: number;
+}
+
+interface FloatingCaptionState extends FloatingCaptionPreferences {
   translatedText: string;
   sourceText: string;
   previousText: string | null;
@@ -19,10 +29,7 @@ interface FloatingCaptionState {
   sessionStatus: string;
   latencyLabel: string;
   revised: boolean;
-  locked: boolean;
-  mousePassthrough: boolean;
-  opacity: number;
-  fontScale: number;
+  running: boolean;
   controlsVisible: boolean;
   updatedAtMs: number;
 }
@@ -65,11 +72,28 @@ interface TranslateTextRequest {
 }
 
 interface TranslateTextResponse {
+  ok?: true;
   text: string;
   provider: "openai" | "deepseek" | "aliyun" | "custom";
   model: string;
   latencyMs: number;
 }
+
+interface TranslateTextFailureResponse {
+  ok: false;
+  text: "";
+  provider: "openai" | "deepseek" | "aliyun" | "custom";
+  model: string;
+  latencyMs: number;
+  failure: {
+    category: "provider" | "network" | "invalid-response" | "untranslated-output" | "cancelled";
+    message: string;
+    httpStatus: number | null;
+    providerCode: string | null;
+  };
+}
+
+type TranslateTextResult = TranslateTextResponse | TranslateTextFailureResponse;
 
 interface TranslationDraftResponse extends TranslateTextResponse {
   requestId: string;
@@ -264,6 +288,24 @@ contextBridge.exposeInMainWorld("simultaneousInterpretation", {
   setFloatingCaptionInteraction: (options: { locked: boolean; mousePassthrough: boolean }) =>
     ipcRenderer.invoke("floating-caption:set-interaction", options),
   resetFloatingCaption: () => ipcRenderer.invoke("floating-caption:reset"),
+  setFloatingCaptionPreferences: (preferences: Partial<FloatingCaptionPreferences>) =>
+    ipcRenderer.send("floating-caption:set-preferences", preferences),
+  setFloatingCaptionMouseIgnore: (ignore: boolean) =>
+    ipcRenderer.send("floating-caption:set-mouse-ignore", ignore),
+  resizeFloatingCaption: (contentHeight: number) =>
+    ipcRenderer.send("floating-caption:resize", contentHeight),
+  adjustFloatingCaptionWidth: (delta: number) =>
+    ipcRenderer.invoke("floating-caption:adjust-width", delta),
+  sendFloatingCaptionCommand: (command: FloatingCaptionCommand) =>
+    ipcRenderer.send("floating-caption:command", command),
+  onFloatingCaptionCommand: (callback: (command: FloatingCaptionCommand) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, command: FloatingCaptionCommand) => {
+      callback(command);
+    };
+
+    ipcRenderer.on("floating-caption:command", listener);
+    return () => ipcRenderer.removeListener("floating-caption:command", listener);
+  },
   getAiRuntimeConfig: () => ipcRenderer.invoke("ai:get-runtime-config"),
   getProviderHealth: () => ipcRenderer.invoke("provider:get-health"),
   startRealtimeProviderSession: (request: StartRealtimeProviderSessionRequest) =>

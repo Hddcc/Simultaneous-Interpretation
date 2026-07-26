@@ -50,7 +50,25 @@ function translated(request: TranslationRequest): Awaited<ReturnType<Translation
     provider: "aliyun",
     model: "qwen-plus",
     error: null,
-    fallback: false
+    fallback: false,
+    attempt: request.attempt ?? "initial"
+  };
+}
+
+function failed(request: TranslationRequest): Awaited<ReturnType<TranslationClient["translate"]>> {
+  return {
+    ...translated(request),
+    translatedText: "",
+    model: request.attempt === "final-recovery" ? "qwen-plus" : "qwen-turbo",
+    error: "provider unavailable",
+    fallback: true,
+    failure: {
+      category: "provider",
+      message: "provider unavailable",
+      httpStatus: 503,
+      providerCode: "ServiceUnavailable"
+    },
+    attempt: request.attempt ?? "initial"
   };
 }
 
@@ -247,6 +265,121 @@ async function main(): Promise<void> {
   await Promise.all(backfills);
   assert.ok(laneCalls.includes("active:active-now"));
   assert.ok(laneCalls.includes("backfill:backfill-1"));
+
+  const recoveryAttempts: string[] = [];
+  let deliverRecovery!: (event: ReturnType<typeof translated>) => void;
+  const recoveryDelivered = new Promise<ReturnType<typeof translated>>((resolve) => {
+    deliverRecovery = resolve;
+  });
+  const recoveryScheduler = createLowLatencyTranslationScheduler({
+    async translate(request) {
+      recoveryAttempts.push(request.attempt ?? "initial");
+      return request.attempt === "final-recovery" ? translated(request) : failed(request);
+    }
+  });
+  const recoverySegment = segment("recover-1", "final text", 1, "final");
+  const initialFailure = await recoveryScheduler.schedule({
+    segment: recoverySegment,
+    languagePair,
+    context: [],
+    nowMs: 5000,
+    onRecovery: deliverRecovery
+  });
+  assert.equal(initialFailure?.translatedText, "");
+  assert.equal(initialFailure?.recoveryScheduled, true);
+  const successfulRecovery = await recoveryDelivered;
+  assert.equal(successfulRecovery.translatedText, "译文 1");
+  assert.equal(successfulRecovery.attempt, "final-recovery");
+  assert.deepEqual(recoveryAttempts, ["initial", "final-recovery"]);
+  assert.equal(recoveryScheduler.getDiagnostics().recoveryQueued, 1);
+  assert.equal(recoveryScheduler.getDiagnostics().recoverySucceeded, 1);
+  assert.equal(recoveryScheduler.getDiagnostics().lastFailure?.httpStatus, 503);
+  assert.equal(recoveryScheduler.getDiagnostics().lastFailure?.recoveryOutcome, "succeeded");
+  assert.equal(recoveryScheduler.getDiagnostics().lastFailure?.firstFailedAtMs, initialFailure?.createdAtMs);
+
+  await recoveryScheduler.schedule({
+    segment: recoverySegment,
+    languagePair,
+    context: [],
+    nowMs: 5100,
+    onRecovery: deliverRecovery
+  });
+  assert.deepEqual(recoveryAttempts, ["initial", "final-recovery"]);
+
+  let failedRecoveryDelivered!: (event: ReturnType<typeof failed>) => void;
+  const failedRecoveryResult = new Promise<ReturnType<typeof failed>>((resolve) => {
+    failedRecoveryDelivered = resolve;
+  });
+  const noLoopScheduler = createLowLatencyTranslationScheduler({
+    async translate(request) {
+      return failed(request);
+    }
+  });
+  await noLoopScheduler.schedule({
+    segment: segment("recover-fails", "final text", 1, "final"),
+    languagePair,
+    context: [],
+    nowMs: 5200,
+    onRecovery: failedRecoveryDelivered
+  });
+  const terminalFailure = await failedRecoveryResult;
+  assert.equal(terminalFailure.attempt, "final-recovery");
+  assert.equal(terminalFailure.recoveryScheduled, undefined);
+  assert.equal(noLoopScheduler.getDiagnostics().requestCount, 2);
+  assert.equal(noLoopScheduler.getDiagnostics().recoveryFailed, 1);
+  assert.equal(noLoopScheduler.getDiagnostics().lastFailure?.recoveryOutcome, "failed");
+
+  const skippedRecoveryScheduler = createLowLatencyTranslationScheduler(
+    { async translate(request) { return failed(request); } },
+    { backfillQueueLimit: 0 }
+  );
+  const skippedRecovery = await skippedRecoveryScheduler.schedule({
+    segment: segment("recover-skipped", "final text", 1, "final"),
+    languagePair,
+    context: [],
+    nowMs: 5250
+  });
+  assert.equal(skippedRecovery?.recoveryScheduled, false);
+  assert.equal(skippedRecoveryScheduler.getDiagnostics().recoverySkipped, 1);
+  assert.equal(skippedRecoveryScheduler.getDiagnostics().lastFailure?.recoveryOutcome, "skipped");
+
+  let releaseRecovery!: () => void;
+  let recoveryStarted!: () => void;
+  let priorityRecoveryDone!: () => void;
+  const recoveryGate = new Promise<void>((resolve) => { releaseRecovery = resolve; });
+  const recoveryStartedSignal = new Promise<void>((resolve) => { recoveryStarted = resolve; });
+  const priorityRecoveryResult = new Promise<void>((resolve) => { priorityRecoveryDone = resolve; });
+  const priorityScheduler = createLowLatencyTranslationScheduler({
+    async translate(request) {
+      if (request.attempt === "final-recovery") {
+        recoveryStarted();
+        await recoveryGate;
+      }
+      if (request.segment.id === "priority-final" && request.attempt !== "final-recovery") {
+        return failed(request);
+      }
+      return translated(request);
+    }
+  }, { minPartialCharacters: 1 });
+  await priorityScheduler.schedule({
+    segment: segment("priority-final", "failed final", 1, "final"),
+    languagePair,
+    context: [],
+    nowMs: 5300,
+    onRecovery: () => priorityRecoveryDone()
+  });
+  await recoveryStartedSignal;
+  const priorityActive = await priorityScheduler.schedule({
+    segment: segment("priority-active", "new partial", 1, "partial"),
+    languagePair,
+    context: [],
+    nowMs: 5310,
+    lane: "active"
+  });
+  assert.equal(priorityActive?.segmentId, "priority-active");
+  assert.equal(priorityScheduler.getDiagnostics().backfillDepth, 1);
+  releaseRecovery();
+  await priorityRecoveryResult;
 
   console.log("translation scheduler checks passed");
 }

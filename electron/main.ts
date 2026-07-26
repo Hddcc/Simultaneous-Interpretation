@@ -3,6 +3,20 @@ import { readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { detectNativeSystemAudioCapability } from "./nativeAudioCapability";
 import {
+  defaultFloatingCaptionPreferences,
+  extractFloatingCaptionContent,
+  FLOATING_MIN_HEIGHT,
+  FLOATING_MIN_WIDTH,
+  mergeFloatingCaptionState,
+  normalizeFloatingCaptionPreferences,
+  resolveFloatingHeight,
+  resolveFloatingWidth,
+  type FloatingCaptionCommand,
+  type FloatingCaptionContent,
+  type FloatingCaptionPreferences,
+  type FloatingCaptionState
+} from "./floatingWindowLayout";
+import {
   buildSubtitleRefinementMessages,
   buildTranslationContextText,
   buildTranslationMessages,
@@ -26,7 +40,8 @@ import {
 const isDev = process.argv.includes("--dev");
 let floatingCaptionWindow: BrowserWindow | null = null;
 let mainWindow: BrowserWindow | null = null;
-let latestFloatingCaptionState: FloatingCaptionState | null = null;
+let latestFloatingCaptionContent: FloatingCaptionContent | null = null;
+let floatingCaptionPreferences: FloatingCaptionPreferences = defaultFloatingCaptionPreferences;
 
 type FloatingCaptionLayout = "compact" | "standard" | "wide";
 type FloatingCaptionPosition = "top-left" | "top-right" | "bottom-left" | "bottom-right";
@@ -34,25 +49,6 @@ type FloatingCaptionPosition = "top-left" | "top-right" | "bottom-left" | "botto
 interface FloatingCaptionOptions {
   layout: FloatingCaptionLayout;
   position: FloatingCaptionPosition;
-}
-
-interface FloatingCaptionState {
-  translatedText: string;
-  sourceText: string;
-  previousText: string | null;
-  statusLabel: string;
-  compactStatusLabel: string;
-  severity: "neutral" | "active" | "warning" | "error";
-  languageDirection: string;
-  sessionStatus: string;
-  latencyLabel: string;
-  revised: boolean;
-  locked: boolean;
-  mousePassthrough: boolean;
-  opacity: number;
-  fontScale: number;
-  controlsVisible: boolean;
-  updatedAtMs: number;
 }
 
 interface AiRuntimeConfig {
@@ -93,11 +89,35 @@ interface TranslateTextRequest {
 }
 
 interface TranslateTextResponse {
+  ok?: true;
   text: string;
   provider: "openai" | "deepseek" | "aliyun" | "custom";
   model: string;
   latencyMs: number;
 }
+
+type TranslationFailureCategory =
+  | "provider"
+  | "network"
+  | "invalid-response"
+  | "untranslated-output"
+  | "cancelled";
+
+interface TranslateTextFailureResponse {
+  ok: false;
+  text: "";
+  provider: "openai" | "deepseek" | "aliyun" | "custom";
+  model: string;
+  latencyMs: number;
+  failure: {
+    category: TranslationFailureCategory;
+    message: string;
+    httpStatus: number | null;
+    providerCode: string | null;
+  };
+}
+
+type TranslateTextResult = TranslateTextResponse | TranslateTextFailureResponse;
 
 interface TranslationDraftResponse extends TranslateTextResponse {
   requestId: string;
@@ -142,6 +162,7 @@ interface TranscribeLocalMediaFileResponse {
 interface OpenAiErrorResponse {
   error?: {
     message?: string;
+    code?: string;
   };
 }
 
@@ -277,6 +298,69 @@ function readOpenAiError(payload: OpenAiErrorResponse): string {
   return payload.error?.message || "OpenAI 请求失败。";
 }
 
+class TranslationProviderError extends Error {
+  constructor(
+    message: string,
+    readonly httpStatus: number | null,
+    readonly providerCode: string | null,
+    readonly category: TranslationFailureCategory = "provider"
+  ) {
+    super(message);
+    this.name = "TranslationProviderError";
+  }
+}
+
+function createProviderRequestError(
+  response: Response,
+  payload: OpenAiErrorResponse
+): TranslationProviderError {
+  return new TranslationProviderError(
+    readOpenAiError(payload),
+    response.status,
+    payload.error?.code ?? null
+  );
+}
+
+function sanitizeTranslationErrorMessage(message: string): string {
+  return message
+    .replace(/\bsk-[A-Za-z0-9_-]+\b/g, "[redacted]")
+    .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
+    .replace(/\bAuthorization\s*[:=]\s*\S+/gi, "Authorization: [redacted]");
+}
+
+function createTranslationFailureResponse(
+  request: TranslateTextRequest,
+  error: unknown,
+  startedAtMs: number,
+  cancelled: boolean
+): TranslateTextFailureResponse {
+  const runtimeConfig = getAiRuntimeConfig();
+  const provider =
+    runtimeConfig.translationProvider === "mock"
+      ? "custom"
+      : runtimeConfig.translationProvider;
+  const typed = error instanceof TranslationProviderError ? error : null;
+  const category: TranslationFailureCategory = cancelled
+    ? "cancelled"
+    : typed?.category ?? (error instanceof SyntaxError ? "invalid-response" : "network");
+  const rawMessage =
+    error instanceof Error ? error.message : cancelled ? "translation request aborted" : "翻译服务调用失败。";
+
+  return {
+    ok: false,
+    text: "",
+    provider,
+    model: request.model || runtimeConfig.translationModel,
+    latencyMs: Date.now() - startedAtMs,
+    failure: {
+      category,
+      message: sanitizeTranslationErrorMessage(rawMessage),
+      httpStatus: typed?.httpStatus ?? null,
+      providerCode: typed?.providerCode ?? null
+    }
+  };
+}
+
 function readOpenAiOutputText(payload: OpenAiResponseOutput): string {
   if (payload.output_text) {
     return payload.output_text.trim();
@@ -364,7 +448,7 @@ async function translateWithOpenAi(
   const payload = (await response.json()) as OpenAiResponseOutput & OpenAiErrorResponse;
 
   if (!response.ok) {
-    throw new Error(readOpenAiError(payload));
+    throw createProviderRequestError(response, payload);
   }
 
   return {
@@ -483,7 +567,7 @@ async function translateWithOpenAiCompatible(
   const payload = (await response.json()) as ChatCompletionOutput & OpenAiErrorResponse;
 
   if (!response.ok) {
-    throw new Error(readOpenAiError(payload));
+    throw createProviderRequestError(response, payload);
   }
 
   return {
@@ -600,16 +684,21 @@ async function transcribeLocalMediaFileWithOpenAi(
   };
 }
 
+/**
+ * Heights match the overlay's reserved line budget (previous line, two source lines,
+ * three translation lines) measured at each preset width, so the window opens at the
+ * size it will hold rather than resizing itself on the first caption.
+ */
 function getFloatingWindowSize(layout: FloatingCaptionLayout): { width: number; height: number } {
   if (layout === "compact") {
-    return { width: 460, height: 176 };
+    return { width: 460, height: 257 };
   }
 
   if (layout === "wide") {
-    return { width: 760, height: 220 };
+    return { width: 760, height: 307 };
   }
 
-  return { width: 620, height: 200 };
+  return { width: 620, height: 302 };
 }
 
 function getFloatingWindowBounds(options: FloatingCaptionOptions): Electron.Rectangle {
@@ -747,13 +836,23 @@ function setFloatingCaptionInteraction(options: {
   locked: boolean;
   mousePassthrough: boolean;
 }): void {
+  setFloatingCaptionMouseIgnore(options.locked && options.mousePassthrough);
+}
+
+/**
+ * Toggling ignore-mouse-events on its own lets the overlay temporarily accept a
+ * click on its unlock chip without disturbing the persisted lock preference.
+ */
+function setFloatingCaptionMouseIgnore(ignore: boolean): void {
   if (!floatingCaptionWindow || floatingCaptionWindow.isDestroyed()) {
     return;
   }
 
-  floatingCaptionWindow.setIgnoreMouseEvents(options.locked && options.mousePassthrough, {
-    forward: true
-  });
+  floatingCaptionWindow.setIgnoreMouseEvents(ignore, { forward: true });
+}
+
+function getFloatingWindowWorkArea(window: BrowserWindow): Electron.Rectangle {
+  return screen.getDisplayMatching(window.getBounds()).workArea;
 }
 
 function loadFloatingCaptionWindow(window: BrowserWindow): void {
@@ -768,11 +867,14 @@ function loadFloatingCaptionWindow(window: BrowserWindow): void {
 }
 
 function sendFloatingCaptionState(): void {
-  if (!floatingCaptionWindow || floatingCaptionWindow.isDestroyed() || !latestFloatingCaptionState) {
+  if (!floatingCaptionWindow || floatingCaptionWindow.isDestroyed() || !latestFloatingCaptionContent) {
     return;
   }
 
-  floatingCaptionWindow.webContents.send("floating-caption:update", latestFloatingCaptionState);
+  floatingCaptionWindow.webContents.send(
+    "floating-caption:update",
+    mergeFloatingCaptionState(latestFloatingCaptionContent, floatingCaptionPreferences)
+  );
 }
 
 function createMainWindow(): void {
@@ -786,7 +888,11 @@ function createMainWindow(): void {
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      // The capture loop, payload queue, and translation scheduler all run in this
+      // renderer. Chromium throttles background timers to ~1Hz, which would stall
+      // interpretation whenever the user works elsewhere and reads only the overlay.
+      backgroundThrottling: false
     }
   });
   window.setMenu(null);
@@ -817,19 +923,24 @@ function createFloatingCaptionWindow(options = defaultFloatingOptions): BrowserW
 
   floatingCaptionWindow = new BrowserWindow({
     ...getFloatingWindowBounds(options),
-    minWidth: 380,
-    minHeight: 140,
+    minWidth: FLOATING_MIN_WIDTH,
+    minHeight: FLOATING_MIN_HEIGHT,
     title: "Floating Caption",
     frame: false,
-    resizable: true,
+    // Electron documents that transparent windows should not be resizable, so width
+    // is stepped from the overlay controls and height tracks the caption content.
+    resizable: false,
     movable: true,
+    transparent: true,
+    hasShadow: false,
     alwaysOnTop: true,
     skipTaskbar: false,
-    backgroundColor: "#020617",
+    backgroundColor: "#00000000",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      backgroundThrottling: false
     }
   });
 
@@ -838,10 +949,12 @@ function createFloatingCaptionWindow(options = defaultFloatingOptions): BrowserW
   floatingCaptionWindow.on("closed", () => {
     floatingCaptionWindow = null;
   });
-  floatingCaptionWindow.webContents.on("did-finish-load", sendFloatingCaptionState);
+  floatingCaptionWindow.webContents.on("did-finish-load", () => {
+    setFloatingCaptionInteraction(floatingCaptionPreferences);
+    sendFloatingCaptionState();
+  });
   loadFloatingCaptionWindow(floatingCaptionWindow);
   floatingCaptionWindow.on("moved", () => sendFloatingCaptionState());
-  floatingCaptionWindow.on("resized", () => sendFloatingCaptionState());
 
   return floatingCaptionWindow;
 }
@@ -950,7 +1063,12 @@ ipcMain.handle("floating-caption:configure", (_event, options: FloatingCaptionOp
 ipcMain.handle(
   "floating-caption:set-interaction",
   (_event, options: { locked: boolean; mousePassthrough: boolean }) => {
-    setFloatingCaptionInteraction(options);
+    floatingCaptionPreferences = normalizeFloatingCaptionPreferences(
+      options,
+      floatingCaptionPreferences
+    );
+    setFloatingCaptionInteraction(floatingCaptionPreferences);
+    sendFloatingCaptionState();
     return {
       visible: Boolean(floatingCaptionWindow && !floatingCaptionWindow.isDestroyed()),
       bounds: floatingCaptionWindow?.isDestroyed() ? undefined : floatingCaptionWindow?.getBounds()
@@ -961,7 +1079,13 @@ ipcMain.handle(
 ipcMain.handle("floating-caption:reset", () => {
   const window = createFloatingCaptionWindow(latestFloatingOptions);
   window.setBounds(getFloatingWindowBounds(latestFloatingOptions), true);
+  floatingCaptionPreferences = {
+    ...floatingCaptionPreferences,
+    locked: false,
+    mousePassthrough: false
+  };
   window.setIgnoreMouseEvents(false);
+  sendFloatingCaptionState();
   return {
     visible: true,
     bounds: window.getBounds()
@@ -969,12 +1093,77 @@ ipcMain.handle("floating-caption:reset", () => {
 });
 
 ipcMain.on("floating-caption:update", (_event, state: FloatingCaptionState) => {
-  latestFloatingCaptionState = state;
-  setFloatingCaptionInteraction({
-    locked: state.locked,
-    mousePassthrough: state.mousePassthrough
-  });
+  latestFloatingCaptionContent = extractFloatingCaptionContent(state);
   sendFloatingCaptionState();
+});
+
+ipcMain.on(
+  "floating-caption:set-preferences",
+  (_event, preferences: Partial<FloatingCaptionPreferences>) => {
+    floatingCaptionPreferences = normalizeFloatingCaptionPreferences(
+      preferences,
+      floatingCaptionPreferences
+    );
+    setFloatingCaptionInteraction(floatingCaptionPreferences);
+    sendFloatingCaptionState();
+  }
+);
+
+ipcMain.on("floating-caption:set-mouse-ignore", (_event, ignore: boolean) => {
+  setFloatingCaptionMouseIgnore(Boolean(ignore));
+});
+
+ipcMain.on("floating-caption:command", (_event, command: FloatingCaptionCommand) => {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+
+  mainWindow.webContents.send("floating-caption:command", command);
+});
+
+ipcMain.on("floating-caption:resize", (_event, contentHeight: number) => {
+  const window = floatingCaptionWindow;
+
+  if (!window || window.isDestroyed()) {
+    return;
+  }
+
+  const bounds = window.getBounds();
+  const next = resolveFloatingHeight({
+    contentHeight,
+    bounds,
+    workArea: getFloatingWindowWorkArea(window)
+  });
+
+  if (next.height === bounds.height && next.y === bounds.y) {
+    return;
+  }
+
+  window.setBounds(next);
+});
+
+ipcMain.handle("floating-caption:adjust-width", (_event, delta: number) => {
+  const window = floatingCaptionWindow;
+
+  if (!window || window.isDestroyed()) {
+    return { visible: false };
+  }
+
+  const bounds = window.getBounds();
+  const next = resolveFloatingWidth({
+    delta,
+    bounds,
+    workArea: getFloatingWindowWorkArea(window)
+  });
+
+  if (next.width !== bounds.width || next.x !== bounds.x) {
+    window.setBounds(next);
+  }
+
+  return {
+    visible: true,
+    bounds: window.getBounds()
+  };
 });
 
 ipcMain.handle("ai:get-runtime-config", () => getAiRuntimeConfig());
@@ -1023,19 +1212,7 @@ ipcMain.handle("ai:translate-text", async (ipcEvent, request: TranslateTextReque
       }
     });
   } catch (error) {
-    if (controller.signal.aborted) {
-      const runtimeConfig = getAiRuntimeConfig();
-      return {
-        text: request.text,
-        provider:
-          runtimeConfig.translationProvider === "mock"
-            ? "custom"
-            : runtimeConfig.translationProvider,
-        model: request.model || runtimeConfig.translationModel,
-        latencyMs: Date.now() - startedAtMs
-      } satisfies TranslateTextResponse;
-    }
-    throw error;
+    return createTranslationFailureResponse(request, error, startedAtMs, controller.signal.aborted);
   } finally {
     if (request.requestId) {
       translationControllers.delete(request.requestId);

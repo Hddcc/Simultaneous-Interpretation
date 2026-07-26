@@ -2,11 +2,18 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
   ChevronDown,
+  ChevronsLeftRight,
+  ChevronsRightLeft,
   ChevronUp,
   Clipboard,
+  Contrast,
   Download,
   History,
+  Lock,
+  LockOpen,
   MonitorUp,
+  Pause,
+  Play,
   Settings,
   Trash2,
   X
@@ -44,6 +51,10 @@ import {
   type CaptionCueSnapshot
 } from "./captions/cue";
 import {
+  initialFloatingHeightRequestState,
+  planFloatingHeightRequest
+} from "./captions/floatingHeight";
+import {
   DEFAULT_REVISION_WINDOW,
   getSubtitleContextItems,
   reconcileSubtitleSegments
@@ -52,6 +63,13 @@ import { createTranslationClient } from "./translation/client";
 import { createSubtitleRefinementClient } from "./translation/refinementClient";
 import { createSubtitleRefinementScheduler } from "./translation/refinementScheduler";
 import { createLowLatencyTranslationScheduler } from "./translation/scheduler";
+import {
+  applyTranslationEventToIssues,
+  getLatestTranslationIssue,
+  getTranslatedCaptionText,
+  getTranslationIssueLabel,
+  type TranslationIssues
+} from "./translation/issues";
 import type { SubtitleRefinementEvent, SubtitleSegment, TranslationEvent } from "./translation/types";
 import type { TtsQueueItem, TtsSessionState } from "./tts/types";
 import type {
@@ -139,13 +157,28 @@ const defaultFloatingCaptionState: FloatingCaptionState = {
   sessionStatus: "idle",
   latencyLabel: "等待字幕",
   revised: false,
+  running: false,
   locked: false,
   mousePassthrough: false,
+  backdrop: "none",
   opacity: 0.92,
   fontScale: 1,
   controlsVisible: true,
   updatedAtMs: Date.now()
 };
+
+const floatingBackdropOrder: FloatingCaptionBackdrop[] = ["none", "soft", "solid"];
+const floatingBackdropLabels: Record<FloatingCaptionBackdrop, string> = {
+  none: "无背景",
+  soft: "淡背景",
+  solid: "深背景"
+};
+
+/** Slack around the unlock chip so it stays easy to hit while the overlay is locked. */
+const FLOATING_CHIP_HIT_PADDING_PX = 6;
+/** Locked overlays get no reliable mouseleave, so idle time hides the unlock chip. */
+const FLOATING_HOVER_IDLE_MS = 1600;
+const FLOATING_RESIZE_THRESHOLD_PX = 4;
 
 const initialTtsSession: TtsSessionState = {
   enabled: false,
@@ -233,98 +266,270 @@ function loadUiFontSize(): UiFontSize {
 function FloatingCaptionWindow() {
   const appInfo = window.simultaneousInterpretation;
   const [caption, setCaption] = useState<FloatingCaptionState>(defaultFloatingCaptionState);
-  const [localLocked, setLocalLocked] = useState(defaultFloatingCaptionState.locked);
-  const [localMousePassthrough, setLocalMousePassthrough] = useState(
-    defaultFloatingCaptionState.mousePassthrough
-  );
-  const [localOpacity, setLocalOpacity] = useState(defaultFloatingCaptionState.opacity);
-  const [localFontScale, setLocalFontScale] = useState(defaultFloatingCaptionState.fontScale);
+  const [unlockChipVisible, setUnlockChipVisible] = useState(false);
+  const shellRef = useRef<HTMLElement>(null);
+  const unlockChipRef = useRef<HTMLButtonElement>(null);
+  const heightRequestStateRef = useRef(initialFloatingHeightRequestState);
+  const lastMeasuredHeightRef = useRef(0);
+  const mouseIgnoredRef = useRef(false);
+  const hoverIdleTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
-    return appInfo?.onFloatingCaptionUpdate?.((state) => {
-      setCaption(state);
-      setLocalLocked(state.locked);
-      setLocalMousePassthrough(state.mousePassthrough);
-      setLocalOpacity(state.opacity);
-      setLocalFontScale(state.fontScale);
-    });
+    return appInfo?.onFloatingCaptionUpdate?.(setCaption);
   }, [appInfo]);
 
-  function publishLocalCaption(next: Partial<FloatingCaptionState>): void {
-    const nextState = {
-      ...caption,
-      locked: localLocked,
-      mousePassthrough: localMousePassthrough,
-      opacity: localOpacity,
-      fontScale: localFontScale,
-      ...next,
-      updatedAtMs: Date.now()
+  // Height follows the caption so a long sentence is shown in full instead of being
+  // clipped to the first line. Growth applies at once and shrinking waits for the cue
+  // to settle, so a streaming translation does not step the window up and down on
+  // every token. Width never changes here, so re-layout cannot loop.
+  useEffect(() => {
+    const shell = shellRef.current;
+
+    if (!shell || !appInfo?.resizeFloatingCaption) {
+      return undefined;
+    }
+
+    let frameId = 0;
+    let recheckTimerId: number | null = null;
+
+    function evaluateHeight(measuredHeight: number): void {
+      lastMeasuredHeightRef.current = measuredHeight;
+
+      const plan = planFloatingHeightRequest({
+        measuredHeight,
+        state: heightRequestStateRef.current,
+        nowMs: Date.now()
+      });
+
+      heightRequestStateRef.current = plan.state;
+
+      if (plan.requestHeight !== null) {
+        appInfo?.resizeFloatingCaption?.(plan.requestHeight);
+      }
+
+      if (recheckTimerId !== null) {
+        window.clearTimeout(recheckTimerId);
+        recheckTimerId = null;
+      }
+
+      // A settled caption stops emitting resize events, so the pending shrink needs
+      // its own wake-up to ever be applied.
+      if (plan.recheckInMs !== null) {
+        recheckTimerId = window.setTimeout(() => {
+          evaluateHeight(lastMeasuredHeightRef.current);
+        }, plan.recheckInMs);
+      }
+    }
+
+    const observer = new ResizeObserver(() => {
+      window.cancelAnimationFrame(frameId);
+      frameId = window.requestAnimationFrame(() => {
+        evaluateHeight(Math.ceil(shell.getBoundingClientRect().height));
+      });
+    });
+
+    observer.observe(shell);
+    return () => {
+      window.cancelAnimationFrame(frameId);
+      if (recheckTimerId !== null) {
+        window.clearTimeout(recheckTimerId);
+      }
+      observer.disconnect();
     };
-    setCaption(nextState);
-    appInfo?.updateFloatingCaption?.(nextState);
+  }, [appInfo]);
+
+  const passthroughActive = caption.locked && caption.mousePassthrough;
+
+  // While the window ignores mouse events, Electron still forwards mousemove. That is
+  // what lets a locked overlay float an unlock chip the way a lyric overlay does:
+  // clicks fall through everywhere except the few pixels the chip occupies.
+  useEffect(() => {
+    if (!passthroughActive) {
+      setUnlockChipVisible(false);
+      return undefined;
+    }
+
+    function setMouseIgnore(ignore: boolean): void {
+      if (mouseIgnoredRef.current === ignore) {
+        return;
+      }
+
+      mouseIgnoredRef.current = ignore;
+      appInfo?.setFloatingCaptionMouseIgnore?.(ignore);
+    }
+
+    function isOverUnlockChip(event: MouseEvent): boolean {
+      const chip = unlockChipRef.current;
+
+      if (!chip) {
+        return false;
+      }
+
+      const rect = chip.getBoundingClientRect();
+      return (
+        event.clientX >= rect.left - FLOATING_CHIP_HIT_PADDING_PX &&
+        event.clientX <= rect.right + FLOATING_CHIP_HIT_PADDING_PX &&
+        event.clientY >= rect.top - FLOATING_CHIP_HIT_PADDING_PX &&
+        event.clientY <= rect.bottom + FLOATING_CHIP_HIT_PADDING_PX
+      );
+    }
+
+    function handleMouseMove(event: MouseEvent): void {
+      setUnlockChipVisible(true);
+      setMouseIgnore(!isOverUnlockChip(event));
+
+      if (hoverIdleTimerRef.current !== null) {
+        window.clearTimeout(hoverIdleTimerRef.current);
+      }
+
+      hoverIdleTimerRef.current = window.setTimeout(() => {
+        setUnlockChipVisible(false);
+        setMouseIgnore(true);
+      }, FLOATING_HOVER_IDLE_MS);
+    }
+
+    // Re-assert the canonical passthrough state on mount so a remount can never leave
+    // the main process and this renderer disagreeing about who owns the mouse.
+    mouseIgnoredRef.current = false;
+    setMouseIgnore(true);
+    window.addEventListener("mousemove", handleMouseMove);
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      if (hoverIdleTimerRef.current !== null) {
+        window.clearTimeout(hoverIdleTimerRef.current);
+        hoverIdleTimerRef.current = null;
+      }
+      // The main process re-applies the canonical state whenever the lock preference
+      // changes, so tearing down here must not fight it with another IPC.
+      mouseIgnoredRef.current = false;
+    };
+  }, [appInfo, passthroughActive]);
+
+  function updatePreferences(next: Partial<FloatingCaptionPreferences>): void {
+    setCaption((current) => ({ ...current, ...next }));
+    appInfo?.setFloatingCaptionPreferences?.(next);
   }
 
   function toggleLocked(): void {
-    const nextLocked = !localLocked;
-    const nextPassthrough = nextLocked ? true : false;
-    setLocalLocked(nextLocked);
-    setLocalMousePassthrough(nextPassthrough);
-    void appInfo?.setFloatingCaptionInteraction?.({
-      locked: nextLocked,
-      mousePassthrough: nextPassthrough
-    });
-    publishLocalCaption({
-      locked: nextLocked,
-      mousePassthrough: nextPassthrough
-    });
+    const nextLocked = !caption.locked;
+    updatePreferences({ locked: nextLocked, mousePassthrough: nextLocked });
   }
 
-  function updateOpacity(nextOpacity: number): void {
-    setLocalOpacity(nextOpacity);
-    publishLocalCaption({ opacity: nextOpacity });
+  function cycleBackdrop(): void {
+    const nextIndex = (floatingBackdropOrder.indexOf(caption.backdrop) + 1) % floatingBackdropOrder.length;
+    updatePreferences({ backdrop: floatingBackdropOrder[nextIndex] });
   }
 
   function updateFontScale(nextScale: number): void {
-    setLocalFontScale(nextScale);
-    publishLocalCaption({ fontScale: nextScale });
+    updatePreferences({ fontScale: Number(nextScale.toFixed(2)) });
   }
 
   return (
     <main
-      className={`floating-caption-shell floating-${caption.severity} ${
-        caption.revised ? "floating-revised" : ""
-      } ${localLocked ? "floating-locked" : ""}`}
+      ref={shellRef}
+      className={`floating-caption-shell floating-${caption.severity} floating-backdrop-${
+        caption.backdrop
+      } ${caption.revised ? "floating-revised" : ""} ${caption.locked ? "floating-locked" : ""}`}
       style={
         {
-          "--floating-opacity": localOpacity,
-          "--floating-font-scale": localFontScale
+          "--floating-opacity": caption.opacity,
+          "--floating-font-scale": caption.fontScale
         } as React.CSSProperties
       }
     >
       <div className="floating-controls" aria-label="悬浮字幕控制">
-        <button type="button" onClick={toggleLocked}>
-          {localLocked ? "解锁" : "锁定"}
+        <button
+          type="button"
+          className="floating-primary-control"
+          aria-label={caption.running ? "暂停翻译" : "开始翻译"}
+          title={caption.running ? "暂停翻译" : "开始翻译"}
+          onClick={() => appInfo?.sendFloatingCaptionCommand?.("toggle-session")}
+        >
+          {caption.running ? <Pause size={14} aria-hidden="true" /> : <Play size={14} aria-hidden="true" />}
         </button>
-        <button type="button" onClick={() => updateFontScale(Math.max(0.82, localFontScale - 0.08))}>
+        <button
+          type="button"
+          aria-label="缩小字号"
+          title="缩小字号"
+          onClick={() => updateFontScale(Math.max(0.7, caption.fontScale - 0.08))}
+        >
           A-
         </button>
-        <button type="button" onClick={() => updateFontScale(Math.min(1.28, localFontScale + 0.08))}>
+        <button
+          type="button"
+          aria-label="放大字号"
+          title="放大字号"
+          onClick={() => updateFontScale(Math.min(2.2, caption.fontScale + 0.08))}
+        >
           A+
         </button>
-        <button type="button" onClick={() => updateOpacity(localOpacity > 0.82 ? 0.72 : 0.92)}>
-          透明
+        <button
+          type="button"
+          aria-label="减小宽度"
+          title="减小宽度"
+          onClick={() => void appInfo?.adjustFloatingCaptionWidth?.(-1)}
+        >
+          <ChevronsRightLeft size={14} aria-hidden="true" />
         </button>
-        <button type="button" onClick={() => void appInfo?.closeFloatingCaption?.()}>
-          关闭
+        <button
+          type="button"
+          aria-label="增大宽度"
+          title="增大宽度"
+          onClick={() => void appInfo?.adjustFloatingCaptionWidth?.(1)}
+        >
+          <ChevronsLeftRight size={14} aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          aria-label={`切换背景：当前${floatingBackdropLabels[caption.backdrop]}`}
+          title={`背景：${floatingBackdropLabels[caption.backdrop]}`}
+          onClick={cycleBackdrop}
+        >
+          <Contrast size={14} aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          aria-label={caption.locked ? "解锁并停止鼠标穿透" : "锁定并开启鼠标穿透"}
+          title={caption.locked ? "解锁字幕" : "锁定字幕（鼠标穿透）"}
+          onClick={toggleLocked}
+        >
+          {caption.locked ? <Lock size={14} aria-hidden="true" /> : <LockOpen size={14} aria-hidden="true" />}
+        </button>
+        <button
+          type="button"
+          aria-label="关闭悬浮字幕"
+          title="关闭悬浮字幕"
+          onClick={() => void appInfo?.closeFloatingCaption?.()}
+        >
+          <X size={14} aria-hidden="true" />
         </button>
       </div>
+      {caption.locked ? (
+        <button
+          type="button"
+          ref={unlockChipRef}
+          className={`floating-unlock-chip ${unlockChipVisible ? "floating-unlock-chip-visible" : ""}`}
+          aria-label="解锁字幕"
+          title="解锁字幕"
+          onClick={toggleLocked}
+        >
+          <Lock size={14} aria-hidden="true" />
+        </button>
+      ) : null}
       <div className="floating-caption-top">
         <span>{caption.compactStatusLabel}</span>
         <span>{caption.languageDirection}</span>
       </div>
       <div className="floating-caption-lines">
+        {/* Always rendered, even when empty, so the reserved rows keep the window
+            height stable instead of jumping when a previous cue appears. */}
+        <p className="floating-previous" aria-label="上一句译文">
+          {caption.previousText ?? ""}
+        </p>
         <p className="floating-source">{caption.sourceText}</p>
-        <p className="floating-translation">{caption.translatedText}</p>
+        <p className="floating-translation" aria-current="true">
+          {caption.translatedText}
+        </p>
       </div>
     </main>
   );
@@ -355,6 +560,7 @@ export function App() {
   const [asrEvents, setAsrEvents] = useState<AsrEvent[]>([]);
   const [asrSegments, setAsrSegments] = useState<AsrSegment[]>([]);
   const [translationEvents, setTranslationEvents] = useState<TranslationEvent[]>([]);
+  const [translationIssues, setTranslationIssues] = useState<TranslationIssues>({});
   const [refinementEvents, setRefinementEvents] = useState<SubtitleRefinementEvent[]>([]);
   const [subtitleSegments, setSubtitleSegments] = useState<SubtitleSegment[]>([]);
   const [captionCueSnapshot, setCaptionCueSnapshot] =
@@ -403,7 +609,7 @@ export function App() {
   const referenceLatencyRunnerRef = useRef(new ProviderLatencyReferenceRunner());
   const subtitleSegmentsRef = useRef<SubtitleSegment[]>([]);
   const captionCueSnapshotRef = useRef<CaptionCueSnapshot>(emptyCaptionCueSnapshot);
-  const floatingCaptionStateRef = useRef<FloatingCaptionState>(defaultFloatingCaptionState);
+  const sessionCommandRef = useRef<() => void>(() => {});
   const ttsSessionRef = useRef<TtsSessionState>(initialTtsSession);
   const captureSessionIdRef = useRef<string | null>(null);
   const captureEpochRef = useRef(0);
@@ -482,14 +688,25 @@ export function App() {
         .slice(0, 3),
     [historyGroups, latestSubtitleSegment?.id]
   );
+  const activeTranslationIssue = getLatestTranslationIssue(
+    translationIssues,
+    activeCue?.id ?? latestAsrSegment?.id
+  );
+  const translationIssueLabel = getTranslationIssueLabel(activeTranslationIssue);
 
   const floatingCaptionState = useMemo<FloatingCaptionState>(
     () => ({
-      translatedText:
-        activeCue?.translatedText ||
-        (activeCue?.sourceText ? "正在生成译文" : latestAsrSegment ? "正在等待稳定片段生成译文" : "等待字幕"),
+      translatedText: getTranslatedCaptionText(
+        activeCue?.translatedText,
+        activeTranslationIssue,
+        activeCue?.sourceText
+          ? "正在生成译文"
+          : latestAsrSegment
+            ? "正在等待稳定片段生成译文"
+            : "等待字幕"
+      ),
       sourceText: activeCue?.sourceText ?? latestAsrSegment?.text ?? selectedSource.description,
-      previousText: previousCue ? previousCue.translatedText || previousCue.sourceText : null,
+      previousText: previousCue ? previousCue.translatedText || "译文暂不可用" : null,
       statusLabel: activeCue
         ? activeCue.revised
           ? "字幕已修订"
@@ -497,8 +714,12 @@ export function App() {
             ? "正在听译"
             : "实时字幕"
         : liveExperience.label,
-      compactStatusLabel: liveExperience.compactLabel,
-      severity: liveExperience.severity,
+      compactStatusLabel: translationIssueLabel ?? liveExperience.compactLabel,
+      severity: activeTranslationIssue
+        ? activeTranslationIssue.recoveryPending
+          ? "warning"
+          : "error"
+        : liveExperience.severity,
       languageDirection: activeLanguagePair.label,
       sessionStatus: liveExperience.label,
       latencyLabel: activeCue?.latency.totalLatencyMs !== null && activeCue?.latency.totalLatencyMs !== undefined
@@ -507,21 +728,28 @@ export function App() {
           ? `${latestAsrEvent.latencyMs} ms`
           : "等待字幕",
       revised: Boolean(activeCue?.revised),
-      locked: floatingCaptionStateRef.current.locked,
-      mousePassthrough: floatingCaptionStateRef.current.mousePassthrough,
-      opacity: floatingCaptionStateRef.current.opacity,
-      fontScale: floatingCaptionStateRef.current.fontScale,
+      running: isSessionRunning,
+      // Lock, backdrop, and font scale are owned by the overlay and merged in the main
+      // process, so a caption refresh never resets what the user picked there.
+      locked: defaultFloatingCaptionState.locked,
+      mousePassthrough: defaultFloatingCaptionState.mousePassthrough,
+      backdrop: defaultFloatingCaptionState.backdrop,
+      opacity: defaultFloatingCaptionState.opacity,
+      fontScale: defaultFloatingCaptionState.fontScale,
       controlsVisible: true,
       updatedAtMs: Date.now()
     }),
     [
       activeLanguagePair.label,
+      activeTranslationIssue,
       activeCue,
+      isSessionRunning,
       latestAsrEvent,
       latestAsrSegment,
       liveExperience,
       previousCue,
       selectedSource.description,
+      translationIssueLabel,
     ]
   );
 
@@ -601,9 +829,22 @@ export function App() {
   }, [captionCueSnapshot]);
 
   useEffect(() => {
-    floatingCaptionStateRef.current = floatingCaptionState;
     appInfo?.updateFloatingCaption?.(floatingCaptionState);
   }, [appInfo, floatingCaptionState]);
+
+  useEffect(() => {
+    sessionCommandRef.current = primarySessionAction;
+  });
+
+  // The overlay owns a start/pause button, so the user can drive interpretation
+  // without bringing the client window back to the front.
+  useEffect(() => {
+    return appInfo?.onFloatingCaptionCommand?.((command) => {
+      if (command === "toggle-session") {
+        sessionCommandRef.current();
+      }
+    });
+  }, [appInfo]);
 
   useEffect(() => {
     ttsSessionRef.current = ttsSession;
@@ -1010,7 +1251,8 @@ export function App() {
           context: getSubtitleContextItems(subtitleSegmentsRef.current, 3),
           nowMs: Date.now(),
           lane,
-          onDraft: (event) => commitTranslationEvent(segment, event)
+          onDraft: (event) => commitTranslationEvent(segment, event),
+          onRecovery: (event) => commitTranslationEvent(segment, event)
         })
         .then((event) => {
           if (event) {
@@ -1018,10 +1260,36 @@ export function App() {
           }
         })
         .catch((error) => {
-          setSession((current) => ({
-            ...current,
-            error: `翻译服务：${error instanceof Error ? error.message : "请求失败"}`
-          }));
+          if (error instanceof Error && error.name === "AbortError") return;
+          const createdAtMs = Date.now();
+          const message = error instanceof Error ? error.message : "请求失败";
+          setTranslationIssues((current) =>
+            applyTranslationEventToIssues(current, {
+              id: `translation-${segment.id}-${segment.revision}-unexpected-failure`,
+              segmentId: segment.id,
+              sourceText: segment.text,
+              translatedText: "",
+              languagePairId: languagePairRef.current.id,
+              sourceLanguage: languagePairRef.current.source.label,
+              targetLanguage: languagePairRef.current.target.label,
+              status: segment.status === "final" ? "translated" : "partial",
+              revision: segment.revision,
+              revisionReason: "translation-correction",
+              createdAtMs,
+              latencyMs: 0,
+              contextSize: 0,
+              provider: providerHealthRef.current?.config.translationProvider ?? "mock",
+              model: languagePairRef.current.translationModel,
+              error: message,
+              fallback: true,
+              failure: {
+                category: "network",
+                message,
+                httpStatus: null,
+                providerCode: null
+              }
+            })
+          );
         });
     });
   }
@@ -1045,12 +1313,15 @@ export function App() {
   }
 
   function commitTranslationEvent(segment: AsrSegment, event: TranslationEvent): void {
-    const firstDraftVisibleAtMs = Date.now();
+    const hasVisibleTranslation = !event.error && Boolean(event.translatedText.trim());
+    const firstDraftVisibleAtMs = hasVisibleTranslation ? Date.now() : null;
     const visibleEvent: TranslationEvent = {
       ...event,
-      firstDraftVisibleAtMs: event.firstDraftVisibleAtMs ?? firstDraftVisibleAtMs,
+      firstDraftVisibleAtMs: hasVisibleTranslation
+        ? event.firstDraftVisibleAtMs ?? firstDraftVisibleAtMs
+        : event.firstDraftVisibleAtMs ?? null,
       finalVisibleAtMs:
-        segment.status === "final" && event.complete !== false
+        hasVisibleTranslation && segment.status === "final" && event.complete !== false
           ? event.finalVisibleAtMs ?? firstDraftVisibleAtMs
           : event.finalVisibleAtMs ?? null
     };
@@ -1072,12 +1343,7 @@ export function App() {
     referenceLatencyRunnerRef.current.recordSample(latencySample);
 
     setTranslationEvents((current) => [visibleEvent, ...current].slice(0, 8));
-    if (visibleEvent.error) {
-      setSession((current) => ({
-        ...current,
-        error: `翻译服务：${visibleEvent.error}`
-      }));
-    }
+    setTranslationIssues((current) => applyTranslationEventToIssues(current, visibleEvent));
 
     const { segments: nextSegments } = reconcileSubtitleSegments({
       current: subtitleSegmentsRef.current,
@@ -1088,7 +1354,9 @@ export function App() {
     });
     commitSubtitleSegments(nextSegments);
     if (!visibleEvent.historyBackfill) {
-      translationSchedulerRef.current.markVisible(segment.id, firstDraftVisibleAtMs, segment.updatedAtMs);
+      if (hasVisibleTranslation && firstDraftVisibleAtMs !== null) {
+        translationSchedulerRef.current.markVisible(segment.id, firstDraftVisibleAtMs, segment.updatedAtMs);
+      }
       syncCaptionCueSnapshot([segment], [visibleEvent]);
     }
     updateRefinementPressure();
@@ -1315,6 +1583,7 @@ export function App() {
     setAsrEvents([]);
     setAsrSegments([]);
     setTranslationEvents([]);
+    setTranslationIssues({});
     setRefinementEvents([]);
     setSubtitleSegments([]);
     setCaptionCueSnapshot(emptyCaptionCueSnapshot);
@@ -1978,27 +2247,24 @@ export function App() {
   }
 
   function unlockFloatingCaption(): void {
-    floatingCaptionStateRef.current = {
-      ...floatingCaptionStateRef.current,
-      locked: false,
-      mousePassthrough: false
-    };
     void appInfo?.setFloatingCaptionInteraction?.({ locked: false, mousePassthrough: false });
-    appInfo?.updateFloatingCaption?.(floatingCaptionStateRef.current);
   }
 
   const activeSourceText = activeCue?.sourceText ?? latestAsrSegment?.text ?? selectedSource.description;
   const activeTranslatedText =
-    activeCue?.translatedText ||
-    (activeCue?.sourceText || latestAsrSegment
-      ? "正在生成译文"
-      : session.sourceType === "system"
-        ? `当前来源：${selectedDesktopSourceName}`
-        : session.sourceType === "microphone"
-          ? `当前设备：${selectedMicrophoneLabel}`
-          : session.selectedFile
-            ? `已选择 ${session.selectedFile.name}`
-            : "选择来源后点击开始同传");
+    getTranslatedCaptionText(
+      activeCue?.translatedText,
+      activeTranslationIssue,
+      activeCue?.sourceText || latestAsrSegment
+        ? "正在生成译文"
+        : session.sourceType === "system"
+          ? `当前来源：${selectedDesktopSourceName}`
+          : session.sourceType === "microphone"
+            ? `当前设备：${selectedMicrophoneLabel}`
+            : session.selectedFile
+              ? `已选择 ${session.selectedFile.name}`
+              : "选择来源后点击开始同传"
+    );
 
   return (
     <main className={`lite-shell theme-${theme} font-${fontSize}`} aria-label="同声传译">
@@ -2130,7 +2396,7 @@ export function App() {
       <section className="caption-stage" aria-live="polite" aria-label="当前字幕">
         <div className="recent-context" aria-label="最近上下文">
           {recentContextGroups.map((group) => (
-            <p key={group.id}>{group.translatedText || group.sourceText}</p>
+            <p key={group.id}>{group.translatedText || "译文暂不可用"}</p>
           ))}
         </div>
         <div className="current-caption">
@@ -2142,6 +2408,7 @@ export function App() {
           </div>
         </div>
         {session.error ? <p className="inline-error" role="alert">{session.error}</p> : null}
+        {translationIssueLabel ? <p className="inline-error" role="alert">{translationIssueLabel}</p> : null}
       </section>
 
       {historyExpanded ? (
@@ -2176,7 +2443,10 @@ export function App() {
                   {group.revised ? <span>已修订</span> : null}
                 </div>
                 <p className="history-source">{group.sourceText}</p>
-                <p className="history-translation">{group.translatedText}</p>
+                <p className="history-translation">
+                  {group.translatedText}
+                  {!group.translationAvailable ? `${group.translatedText ? " " : ""}译文暂不可用` : null}
+                </p>
               </article>
             ))}
           </div>

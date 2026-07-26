@@ -157,6 +157,127 @@ async function main(): Promise<void> {
   assert.equal(complete.translatedText, "完整响应");
   assert.equal(fallbackDraftSubscribed, false);
 
+  window.simultaneousInterpretation = {
+    getProviderHealth: async () => health(false),
+    onTranslationDraft: () => () => undefined,
+    translateText: async (request) => ({
+      text: request.text,
+      provider: "aliyun",
+      model: request.model ?? "qwen-turbo",
+      latencyMs: 220
+    }),
+    cancelTranslation: () => undefined
+  } as Window["simultaneousInterpretation"];
+  const untranslated = await createTranslationClient().translate({
+    segment,
+    languagePair,
+    context: [],
+    lane: "active"
+  });
+  assert.equal(untranslated.translatedText, "");
+  assert.equal(untranslated.error, "翻译服务返回了未转换为目标语言的文本。");
+  assert.equal(untranslated.failure?.category, "untranslated-output");
+
+  window.simultaneousInterpretation = {
+    getProviderHealth: async () => health(false),
+    onTranslationDraft: () => () => undefined,
+    translateText: async () => ({
+      ok: false,
+      text: "",
+      provider: "aliyun",
+      model: "qwen-plus",
+      latencyMs: 240,
+      failure: {
+        category: "provider",
+        message: "quota exceeded",
+        httpStatus: 429,
+        providerCode: "Throttling"
+      }
+    }),
+    cancelTranslation: () => undefined
+  } as Window["simultaneousInterpretation"];
+  const providerFailure = await createTranslationClient().translate({
+    segment,
+    languagePair,
+    context: [],
+    lane: "active"
+  });
+  assert.equal(providerFailure.translatedText, "");
+  assert.equal(providerFailure.error, "quota exceeded");
+  assert.deepEqual(providerFailure.failure, {
+    category: "provider",
+    message: "quota exceeded",
+    httpStatus: 429,
+    providerCode: "Throttling"
+  });
+
+  window.simultaneousInterpretation = {
+    getProviderHealth: async () => health(false),
+    onTranslationDraft: () => () => undefined,
+    translateText: async () => {
+      throw new Error("network unavailable");
+    },
+    cancelTranslation: () => undefined
+  } as Window["simultaneousInterpretation"];
+  const networkFailure = await createTranslationClient().translate({
+    segment,
+    languagePair,
+    context: [],
+    lane: "active"
+  });
+  assert.equal(networkFailure.translatedText, "");
+  assert.equal(networkFailure.failure?.category, "network");
+
+  let recoveryRequest: TranslateTextRequest | null = null;
+  window.simultaneousInterpretation = {
+    getProviderHealth: async () => health(true),
+    onTranslationDraft: () => () => undefined,
+    translateText: async (request) => {
+      recoveryRequest = request;
+      return {
+        text: "爱丽丝订购了 12 个实时翻译单元。",
+        provider: "aliyun",
+        model: request.model ?? "qwen-plus",
+        latencyMs: 280
+      };
+    },
+    cancelTranslation: () => undefined
+  } as Window["simultaneousInterpretation"];
+  const recovered = await createTranslationClient().translate({
+    segment: { ...segment, status: "final" },
+    languagePair,
+    context: [],
+    lane: "backfill",
+    attempt: "final-recovery"
+  });
+  assert.equal(recoveryRequest?.model, "qwen-plus");
+  assert.equal(recoveryRequest?.stream, false);
+  assert.equal(recoveryRequest?.fastDraft, false);
+  assert.equal(recovered.attempt, "final-recovery");
+
+  window.simultaneousInterpretation = {
+    getProviderHealth: async () => health(true),
+    onTranslationDraft: () => () => undefined,
+    translateText: async () => ({
+      ok: false,
+      text: "",
+      provider: "aliyun",
+      model: "qwen-turbo",
+      latencyMs: 10,
+      failure: {
+        category: "cancelled",
+        message: "translation request aborted",
+        httpStatus: null,
+        providerCode: null
+      }
+    }),
+    cancelTranslation: () => undefined
+  } as Window["simultaneousInterpretation"];
+  await assert.rejects(
+    createTranslationClient().translate({ segment, languagePair, context: [], lane: "active" }),
+    { name: "AbortError" }
+  );
+
   let rejectInvoke!: (error: Error) => void;
   let cancelledRequestId = "";
   window.simultaneousInterpretation = {

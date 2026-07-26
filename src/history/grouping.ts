@@ -21,6 +21,7 @@ function createGroup(record: HistoryRecord): HistoryGroup {
     endedAtMs: record.endedAtMs,
     sourceText: record.sourceText,
     translatedText: record.translatedText,
+    translationAvailable: record.translationAvailable ?? Boolean(record.translatedText.trim()),
     revised: record.revised,
     records: [record]
   };
@@ -30,6 +31,9 @@ function appendRecord(group: HistoryGroup, record: HistoryRecord): void {
   group.endedAtMs = Math.max(group.endedAtMs, record.endedAtMs);
   group.sourceText = joinText(group.sourceText, record.sourceText);
   group.translatedText = joinText(group.translatedText, record.translatedText);
+  group.translationAvailable =
+    group.translationAvailable &&
+    (record.translationAvailable ?? Boolean(record.translatedText.trim()));
   group.revised = group.revised || record.revised;
   group.records.push(record);
 }

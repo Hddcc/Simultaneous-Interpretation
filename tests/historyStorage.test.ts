@@ -64,11 +64,32 @@ storage.values.set(HISTORY_STORAGE_KEY, JSON.stringify({ version: 1, records: [{
 assert.deepEqual(loadHistory(storage), []);
 
 const groups: HistoryGroup[] = [
-  { id: "new", startedAtMs: 2000, endedAtMs: 2500, sourceText: "Second", translatedText: "第二段", revised: false, records: [record(2)] },
-  { id: "old", startedAtMs: 1000, endedAtMs: 1500, sourceText: "First", translatedText: "第一段", revised: false, records: [record(1)] }
+  { id: "new", startedAtMs: 2000, endedAtMs: 2500, sourceText: "Second", translatedText: "第二段", translationAvailable: true, revised: false, records: [record(2)] },
+  { id: "old", startedAtMs: 1000, endedAtMs: 1500, sourceText: "First", translatedText: "第一段", translationAvailable: true, revised: false, records: [record(1)] }
 ];
 const serialized = serializeHistoryText(groups);
 assert.ok(serialized.indexOf("First") < serialized.indexOf("Second"));
 assert.match(serialized, /第一段[\s\S]*第二段/u);
+
+const recovered = upsertHistoryRecords(
+  [record(3, { translatedText: "", translationAvailable: false })],
+  [record(3, { translatedText: "恢复译文", translationAvailable: true, revised: true })]
+);
+assert.equal(recovered.length, 1);
+assert.equal(recovered[0].translatedText, "恢复译文");
+assert.equal(recovered[0].translationAvailable, true);
+const unavailableSerialized = serializeHistoryText([
+  {
+    id: "unavailable",
+    startedAtMs: 3000,
+    endedAtMs: 3500,
+    sourceText: "Source unavailable",
+    translatedText: "",
+    translationAvailable: false,
+    revised: false,
+    records: [record(3, { translatedText: "", translationAvailable: false })]
+  }
+]);
+assert.ok(unavailableSerialized.includes("[译文暂不可用]"));
 
 console.log("history storage checks passed");

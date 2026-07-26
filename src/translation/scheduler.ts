@@ -2,6 +2,7 @@ import type { AsrSegment } from "../asr/types";
 import type {
   TranslationClient,
   TranslationEvent,
+  TranslationAttempt,
   TranslationLanguagePair,
   TranslationRequest
 } from "./types";
@@ -41,6 +42,24 @@ export interface TranslationSchedulerDiagnostics {
   rollbackBlocks: number;
   activeLag: number;
   requestCount: number;
+  recoveryQueued: number;
+  recoverySucceeded: number;
+  recoveryFailed: number;
+  recoverySkipped: number;
+  lastFailure: {
+    segmentId: string;
+    revision: number;
+    provider: TranslationEvent["provider"];
+    model: string;
+    category: string;
+    message: string;
+    httpStatus: number | null;
+    providerCode: string | null;
+    firstFailedAtMs: number;
+    lastFailedAtMs: number;
+    recoveryAttempted: boolean;
+    recoveryOutcome: "pending" | "succeeded" | "failed" | "skipped" | null;
+  } | null;
   catchUpState: CatchUpState;
 }
 
@@ -57,7 +76,10 @@ interface QueuedJob {
   resolve: (event: TranslationEvent | null) => void;
   reject: (error: unknown) => void;
   superseded: boolean;
+  attempt: TranslationAttempt;
   onDraft?: (event: TranslationEvent) => void;
+  onRecovery?: (event: TranslationEvent) => void;
+  recoveryFailure?: TranslationEvent;
 }
 
 interface RunningJob {
@@ -83,14 +105,19 @@ function hasSentenceBoundary(text: string): boolean {
   return /[.!?。！？]$/.test(text.trim());
 }
 
-function createJobKey(segment: AsrSegment, languagePair: TranslationLanguagePair): string {
+function createJobKey(
+  segment: AsrSegment,
+  languagePair: TranslationLanguagePair,
+  attempt: TranslationAttempt = "initial"
+): string {
   return [
     segment.id,
     segment.revision,
     segment.status,
     segment.text,
     languagePair.id,
-    languagePair.translationModel
+    languagePair.translationModel,
+    attempt
   ].join("::");
 }
 
@@ -108,6 +135,8 @@ export class LowLatencyTranslationScheduler {
   private readonly pendingByKey = new Map<string, Promise<TranslationEvent | null>>();
   private readonly latestRevisionBySegment = new Map<string, string>();
   private readonly segmentOrdinals = new Map<string, number>();
+  private readonly recoveryKeys = new Set<string>();
+  private readonly firstFailureAtByRevision = new Map<string, number>();
   private activePending: QueuedJob | null = null;
   private activeRunning: RunningJob | null = null;
   private backfillQueue: QueuedJob[] = [];
@@ -126,6 +155,11 @@ export class LowLatencyTranslationScheduler {
   private skippedBackfills = 0;
   private rollbackBlocks = 0;
   private requestCount = 0;
+  private recoveryQueued = 0;
+  private recoverySucceeded = 0;
+  private recoveryFailed = 0;
+  private recoverySkipped = 0;
+  private lastFailure: TranslationSchedulerDiagnostics["lastFailure"] = null;
   private lastInFlightAgeMs: number | null = null;
   private lastStaleResponseAgeMs: number | null = null;
   private lastVisibleLatencyMs: number | null = null;
@@ -150,6 +184,8 @@ export class LowLatencyTranslationScheduler {
     this.pendingByKey.clear();
     this.latestRevisionBySegment.clear();
     this.segmentOrdinals.clear();
+    this.recoveryKeys.clear();
+    this.firstFailureAtByRevision.clear();
     this.activePending = null;
     this.activeRunning = null;
     this.backfillQueue = [];
@@ -168,6 +204,11 @@ export class LowLatencyTranslationScheduler {
     this.skippedBackfills = 0;
     this.rollbackBlocks = 0;
     this.requestCount = 0;
+    this.recoveryQueued = 0;
+    this.recoverySucceeded = 0;
+    this.recoveryFailed = 0;
+    this.recoverySkipped = 0;
+    this.lastFailure = null;
     this.lastInFlightAgeMs = null;
     this.lastStaleResponseAgeMs = null;
     this.lastVisibleLatencyMs = null;
@@ -196,6 +237,7 @@ export class LowLatencyTranslationScheduler {
     nowMs: number;
     lane?: TranslationLane;
     onDraft?: (event: TranslationEvent) => void;
+    onRecovery?: (event: TranslationEvent) => void;
   }): Promise<TranslationEvent | null> {
     const { segment, languagePair, context, nowMs } = input;
     let lane = input.lane ?? "active";
@@ -254,7 +296,9 @@ export class LowLatencyTranslationScheduler {
       resolve,
       reject,
       superseded: false,
-      onDraft: input.onDraft
+      attempt: "initial",
+      onDraft: input.onDraft,
+      onRecovery: input.onRecovery
     };
     this.pendingByKey.set(key, promise);
 
@@ -312,6 +356,11 @@ export class LowLatencyTranslationScheduler {
       rollbackBlocks: this.rollbackBlocks,
       activeLag,
       requestCount: this.requestCount,
+      recoveryQueued: this.recoveryQueued,
+      recoverySucceeded: this.recoverySucceeded,
+      recoveryFailed: this.recoveryFailed,
+      recoverySkipped: this.recoverySkipped,
+      lastFailure: this.lastFailure,
       catchUpState:
         activeLag > 1 || Boolean(this.activePending) || this.backfillQueue.length >= this.options.backfillQueueLimit
           ? "catching-up"
@@ -352,7 +401,7 @@ export class LowLatencyTranslationScheduler {
     this.dispatchActive();
   }
 
-  private enqueueBackfill(job: QueuedJob): void {
+  private enqueueBackfill(job: QueuedJob): boolean {
     const replaced = this.backfillQueue.filter(
       (queued) => queued.segment.id === job.segment.id && queued.key !== job.key
     );
@@ -366,11 +415,16 @@ export class LowLatencyTranslationScheduler {
       const dropped = this.backfillQueue.shift();
       if (dropped) {
         this.skippedBackfills += 1;
+        if (dropped.attempt === "final-recovery") {
+          this.recoverySkipped += 1;
+          if (dropped !== job) this.deliverSkippedRecovery(dropped);
+        }
         this.pendingByKey.delete(dropped.key);
         dropped.resolve(null);
       }
     }
     this.dispatchBackfill();
+    return this.backfillRunning?.job === job || this.backfillQueue.includes(job);
   }
 
   private dispatchActive(): void {
@@ -420,7 +474,7 @@ export class LowLatencyTranslationScheduler {
     this.requestCount += 1;
 
     try {
-      const event = await this.client.translate({
+      let event = await this.client.translate({
         segment: job.segment,
         languagePair: job.languagePair,
         context: job.context,
@@ -428,6 +482,7 @@ export class LowLatencyTranslationScheduler {
         translationRequestedAtMs: requestedAtMs,
         signal: controller.signal,
         lane: job.lane,
+        attempt: job.attempt,
         onDraft: job.onDraft
           ? (event) => {
               const segmentKey = `${job.segment.id}::${job.languagePair.id}`;
@@ -450,13 +505,30 @@ export class LowLatencyTranslationScheduler {
       const revisionIsCurrent = this.latestRevisionBySegment.get(segmentKey) === job.revisionKey;
       const activeHasAdvanced = job.lane === "active" && job.ordinal < this.latestEligibleOrdinal;
 
+      if (
+        event.error &&
+        job.segment.status === "final" &&
+        job.attempt === "initial" &&
+        revisionIsCurrent
+      ) {
+        event = { ...event, recoveryScheduled: this.enqueueFinalRecovery(job, event) };
+      }
+      if (event.error) this.recordFailure(event);
+
       if (!revisionIsCurrent || job.superseded || activeHasAdvanced) {
         this.droppedStale += 1;
         this.lastStaleResponseAgeMs = Math.max(0, Date.now() - job.enqueuedAtMs);
         if (job.segment.status === "final" && revisionIsCurrent) {
           this.lateFinalBackfills += 1;
-          job.resolve({ ...event, lane: "backfill", historyBackfill: true });
+          if (job.attempt === "final-recovery") this.recordRecoveryResult(event);
+          const delivered = { ...event, lane: "backfill" as const, historyBackfill: true };
+          job.resolve(delivered);
+          if (job.attempt === "final-recovery") job.onRecovery?.(delivered);
         } else {
+          if (job.attempt === "final-recovery") {
+            this.recoverySkipped += 1;
+            this.deliverSkippedRecovery(job);
+          }
           job.resolve(null);
         }
         return;
@@ -465,10 +537,14 @@ export class LowLatencyTranslationScheduler {
       const delivered = {
         ...event,
         lane: job.lane,
-        historyBackfill: job.lane === "backfill"
+        historyBackfill:
+          job.lane === "backfill" &&
+          (job.attempt !== "final-recovery" || job.ordinal < this.latestEligibleOrdinal)
       } satisfies TranslationEvent;
+      if (job.attempt === "final-recovery") this.recordRecoveryResult(delivered);
       this.cacheEvent(job.key, delivered);
       job.resolve(delivered);
+      if (job.attempt === "final-recovery") job.onRecovery?.(delivered);
     } catch (error) {
       if (controller.signal.aborted || isAbortError(error)) {
         this.cancellationSucceeded += 1;
@@ -482,6 +558,110 @@ export class LowLatencyTranslationScheduler {
     }
   }
 
+  private enqueueFinalRecovery(source: QueuedJob, failureEvent: TranslationEvent): boolean {
+    const key = createJobKey(source.segment, source.languagePair, "final-recovery");
+    if (this.recoveryKeys.has(key) || this.pendingByKey.has(key)) {
+      this.recoverySkipped += 1;
+      return false;
+    }
+    this.recoveryKeys.add(key);
+
+    let resolve!: (event: TranslationEvent | null) => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<TranslationEvent | null>((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise;
+      reject = rejectPromise;
+    });
+    void promise.catch(() => undefined);
+    const recovery: QueuedJob = {
+      ...source,
+      key,
+      lane: "backfill",
+      enqueuedAtMs: Date.now(),
+      promise,
+      resolve,
+      reject,
+      superseded: false,
+      attempt: "final-recovery",
+      onDraft: undefined,
+      recoveryFailure: failureEvent
+    };
+    this.pendingByKey.set(key, promise);
+    this.recoveryQueued += 1;
+    return this.enqueueBackfill(recovery);
+  }
+
+  private recordFailure(event: TranslationEvent): void {
+    const key = `${event.segmentId}::${event.revision}`;
+    const firstFailedAtMs = this.firstFailureAtByRevision.get(key) ?? event.createdAtMs;
+    this.firstFailureAtByRevision.set(key, firstFailedAtMs);
+    this.lastFailure = {
+      segmentId: event.segmentId,
+      revision: event.revision,
+      provider: event.provider,
+      model: event.model,
+      category: event.failure?.category ?? "provider",
+      message: event.error ?? "translation failed",
+      httpStatus: event.failure?.httpStatus ?? null,
+      providerCode: event.failure?.providerCode ?? null,
+      firstFailedAtMs,
+      lastFailedAtMs: event.createdAtMs,
+      recoveryAttempted:
+        event.attempt === "final-recovery" || event.recoveryScheduled !== undefined,
+      recoveryOutcome:
+        event.attempt === "final-recovery"
+          ? "failed"
+          : event.recoveryScheduled
+            ? "pending"
+            : event.recoveryScheduled === false
+              ? "skipped"
+              : null
+    };
+  }
+
+  private updateRecoveryOutcome(
+    event: Pick<TranslationEvent, "segmentId" | "revision">,
+    outcome: "succeeded" | "failed" | "skipped"
+  ): void {
+    if (
+      this.lastFailure?.segmentId !== event.segmentId ||
+      this.lastFailure.revision !== event.revision
+    ) {
+      return;
+    }
+    this.lastFailure = {
+      ...this.lastFailure,
+      recoveryAttempted: true,
+      recoveryOutcome: outcome
+    };
+  }
+
+  private recordRecoveryResult(event: TranslationEvent): void {
+    if (event.error) {
+      this.recoveryFailed += 1;
+      this.updateRecoveryOutcome(event, "failed");
+    } else {
+      this.recoverySucceeded += 1;
+      this.updateRecoveryOutcome(event, "succeeded");
+    }
+  }
+
+  private deliverSkippedRecovery(job: QueuedJob): void {
+    const failure = job.recoveryFailure;
+    if (!failure) return;
+    const skipped = {
+      ...failure,
+      id: `${failure.id}-recovery-skipped`,
+      createdAtMs: Date.now(),
+      attempt: "final-recovery" as const,
+      recoveryScheduled: false,
+      lane: "backfill" as const,
+      historyBackfill: job.ordinal < this.latestEligibleOrdinal
+    };
+    this.updateRecoveryOutcome(skipped, "skipped");
+    job.onRecovery?.(skipped);
+  }
+
   private supersede(job: QueuedJob, location: "pending" | "backfill"): void {
     job.superseded = true;
     this.pendingByKey.delete(job.key);
@@ -490,6 +670,8 @@ export class LowLatencyTranslationScheduler {
     } else if (location === "backfill") {
       this.skippedBackfills += 1;
     }
+    if (job.attempt === "final-recovery") this.recoverySkipped += 1;
+    if (job.attempt === "final-recovery") this.deliverSkippedRecovery(job);
     this.droppedStale += 1;
     job.resolve(null);
   }

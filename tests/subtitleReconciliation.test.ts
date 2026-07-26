@@ -118,6 +118,15 @@ const fallback = applyOne(
 assert.equal(fallback[0].revision, 4);
 assert.equal(fallback[0].revisionProvenance, "manual-fallback");
 assert.equal(fallback[0].translationFallback, true);
+assert.equal(fallback[0].translatedText, "这条链路会接收小段音频块");
+
+const unavailable = applyOne(
+  [],
+  createTranslationEvent("seg-unavailable", "Provider returned source text", "", true),
+  createAsrSegment("seg-unavailable", "Provider returned source text", "final", 2500)
+);
+assert.equal(unavailable[0].translatedText, "");
+assert.equal(unavailable[0].firstDraftVisibleAtMs, null);
 
 const oldSegments: SubtitleSegment[] = Array.from({ length: 5 }, (_, index) => ({
   ...translated[0],
@@ -203,5 +212,20 @@ assert.equal(refined[0].revisionProvenance, "refinement-correction");
 assert.equal(refined[0].translatedText, "这条链路会接收一小段一小段的音频。");
 assert.equal(refined[0].refinementProvider, "aliyun");
 assert.equal(refined[0].refinementLatencyMs, 120);
+
+const skippedInvalidRefinement = reconcileSubtitleSegments({
+  current: fallback,
+  translationEvents: [],
+  refinementEvents: [{
+    ...refinementEvent,
+    revision: fallback[0].revision,
+    translatedText: fallback[0].translatedText,
+    refinedTranslatedText: "不应提交的润色"
+  }],
+  asrSegments: [createAsrSegment("seg-1", fallback[0].sourceText, "final", 1000)],
+  revisionWindow: DEFAULT_REVISION_WINDOW
+}).segments;
+assert.equal(skippedInvalidRefinement[0].translatedText, fallback[0].translatedText);
+assert.equal(skippedInvalidRefinement[0].refinementProvider, undefined);
 
 console.log("subtitle reconciliation checks passed");
