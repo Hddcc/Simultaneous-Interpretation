@@ -3,6 +3,20 @@ import { readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { detectNativeSystemAudioCapability } from "./nativeAudioCapability";
 import {
+  defaultFloatingCaptionPreferences,
+  extractFloatingCaptionContent,
+  FLOATING_MIN_HEIGHT,
+  FLOATING_MIN_WIDTH,
+  mergeFloatingCaptionState,
+  normalizeFloatingCaptionPreferences,
+  resolveFloatingHeight,
+  resolveFloatingWidth,
+  type FloatingCaptionCommand,
+  type FloatingCaptionContent,
+  type FloatingCaptionPreferences,
+  type FloatingCaptionState
+} from "./floatingWindowLayout";
+import {
   buildSubtitleRefinementMessages,
   buildTranslationContextText,
   buildTranslationMessages,
@@ -26,7 +40,8 @@ import {
 const isDev = process.argv.includes("--dev");
 let floatingCaptionWindow: BrowserWindow | null = null;
 let mainWindow: BrowserWindow | null = null;
-let latestFloatingCaptionState: FloatingCaptionState | null = null;
+let latestFloatingCaptionContent: FloatingCaptionContent | null = null;
+let floatingCaptionPreferences: FloatingCaptionPreferences = defaultFloatingCaptionPreferences;
 
 type FloatingCaptionLayout = "compact" | "standard" | "wide";
 type FloatingCaptionPosition = "top-left" | "top-right" | "bottom-left" | "bottom-right";
@@ -34,25 +49,6 @@ type FloatingCaptionPosition = "top-left" | "top-right" | "bottom-left" | "botto
 interface FloatingCaptionOptions {
   layout: FloatingCaptionLayout;
   position: FloatingCaptionPosition;
-}
-
-interface FloatingCaptionState {
-  translatedText: string;
-  sourceText: string;
-  previousText: string | null;
-  statusLabel: string;
-  compactStatusLabel: string;
-  severity: "neutral" | "active" | "warning" | "error";
-  languageDirection: string;
-  sessionStatus: string;
-  latencyLabel: string;
-  revised: boolean;
-  locked: boolean;
-  mousePassthrough: boolean;
-  opacity: number;
-  fontScale: number;
-  controlsVisible: boolean;
-  updatedAtMs: number;
 }
 
 interface AiRuntimeConfig {
@@ -688,16 +684,21 @@ async function transcribeLocalMediaFileWithOpenAi(
   };
 }
 
+/**
+ * Heights match the overlay's reserved line budget (previous line, two source lines,
+ * three translation lines) measured at each preset width, so the window opens at the
+ * size it will hold rather than resizing itself on the first caption.
+ */
 function getFloatingWindowSize(layout: FloatingCaptionLayout): { width: number; height: number } {
   if (layout === "compact") {
-    return { width: 460, height: 176 };
+    return { width: 460, height: 257 };
   }
 
   if (layout === "wide") {
-    return { width: 760, height: 220 };
+    return { width: 760, height: 307 };
   }
 
-  return { width: 620, height: 200 };
+  return { width: 620, height: 302 };
 }
 
 function getFloatingWindowBounds(options: FloatingCaptionOptions): Electron.Rectangle {
@@ -835,13 +836,23 @@ function setFloatingCaptionInteraction(options: {
   locked: boolean;
   mousePassthrough: boolean;
 }): void {
+  setFloatingCaptionMouseIgnore(options.locked && options.mousePassthrough);
+}
+
+/**
+ * Toggling ignore-mouse-events on its own lets the overlay temporarily accept a
+ * click on its unlock chip without disturbing the persisted lock preference.
+ */
+function setFloatingCaptionMouseIgnore(ignore: boolean): void {
   if (!floatingCaptionWindow || floatingCaptionWindow.isDestroyed()) {
     return;
   }
 
-  floatingCaptionWindow.setIgnoreMouseEvents(options.locked && options.mousePassthrough, {
-    forward: true
-  });
+  floatingCaptionWindow.setIgnoreMouseEvents(ignore, { forward: true });
+}
+
+function getFloatingWindowWorkArea(window: BrowserWindow): Electron.Rectangle {
+  return screen.getDisplayMatching(window.getBounds()).workArea;
 }
 
 function loadFloatingCaptionWindow(window: BrowserWindow): void {
@@ -856,11 +867,14 @@ function loadFloatingCaptionWindow(window: BrowserWindow): void {
 }
 
 function sendFloatingCaptionState(): void {
-  if (!floatingCaptionWindow || floatingCaptionWindow.isDestroyed() || !latestFloatingCaptionState) {
+  if (!floatingCaptionWindow || floatingCaptionWindow.isDestroyed() || !latestFloatingCaptionContent) {
     return;
   }
 
-  floatingCaptionWindow.webContents.send("floating-caption:update", latestFloatingCaptionState);
+  floatingCaptionWindow.webContents.send(
+    "floating-caption:update",
+    mergeFloatingCaptionState(latestFloatingCaptionContent, floatingCaptionPreferences)
+  );
 }
 
 function createMainWindow(): void {
@@ -874,7 +888,11 @@ function createMainWindow(): void {
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      // The capture loop, payload queue, and translation scheduler all run in this
+      // renderer. Chromium throttles background timers to ~1Hz, which would stall
+      // interpretation whenever the user works elsewhere and reads only the overlay.
+      backgroundThrottling: false
     }
   });
   window.setMenu(null);
@@ -905,19 +923,24 @@ function createFloatingCaptionWindow(options = defaultFloatingOptions): BrowserW
 
   floatingCaptionWindow = new BrowserWindow({
     ...getFloatingWindowBounds(options),
-    minWidth: 380,
-    minHeight: 140,
+    minWidth: FLOATING_MIN_WIDTH,
+    minHeight: FLOATING_MIN_HEIGHT,
     title: "Floating Caption",
     frame: false,
-    resizable: true,
+    // Electron documents that transparent windows should not be resizable, so width
+    // is stepped from the overlay controls and height tracks the caption content.
+    resizable: false,
     movable: true,
+    transparent: true,
+    hasShadow: false,
     alwaysOnTop: true,
     skipTaskbar: false,
-    backgroundColor: "#020617",
+    backgroundColor: "#00000000",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      backgroundThrottling: false
     }
   });
 
@@ -926,10 +949,12 @@ function createFloatingCaptionWindow(options = defaultFloatingOptions): BrowserW
   floatingCaptionWindow.on("closed", () => {
     floatingCaptionWindow = null;
   });
-  floatingCaptionWindow.webContents.on("did-finish-load", sendFloatingCaptionState);
+  floatingCaptionWindow.webContents.on("did-finish-load", () => {
+    setFloatingCaptionInteraction(floatingCaptionPreferences);
+    sendFloatingCaptionState();
+  });
   loadFloatingCaptionWindow(floatingCaptionWindow);
   floatingCaptionWindow.on("moved", () => sendFloatingCaptionState());
-  floatingCaptionWindow.on("resized", () => sendFloatingCaptionState());
 
   return floatingCaptionWindow;
 }
@@ -1038,7 +1063,12 @@ ipcMain.handle("floating-caption:configure", (_event, options: FloatingCaptionOp
 ipcMain.handle(
   "floating-caption:set-interaction",
   (_event, options: { locked: boolean; mousePassthrough: boolean }) => {
-    setFloatingCaptionInteraction(options);
+    floatingCaptionPreferences = normalizeFloatingCaptionPreferences(
+      options,
+      floatingCaptionPreferences
+    );
+    setFloatingCaptionInteraction(floatingCaptionPreferences);
+    sendFloatingCaptionState();
     return {
       visible: Boolean(floatingCaptionWindow && !floatingCaptionWindow.isDestroyed()),
       bounds: floatingCaptionWindow?.isDestroyed() ? undefined : floatingCaptionWindow?.getBounds()
@@ -1049,7 +1079,13 @@ ipcMain.handle(
 ipcMain.handle("floating-caption:reset", () => {
   const window = createFloatingCaptionWindow(latestFloatingOptions);
   window.setBounds(getFloatingWindowBounds(latestFloatingOptions), true);
+  floatingCaptionPreferences = {
+    ...floatingCaptionPreferences,
+    locked: false,
+    mousePassthrough: false
+  };
   window.setIgnoreMouseEvents(false);
+  sendFloatingCaptionState();
   return {
     visible: true,
     bounds: window.getBounds()
@@ -1057,12 +1093,77 @@ ipcMain.handle("floating-caption:reset", () => {
 });
 
 ipcMain.on("floating-caption:update", (_event, state: FloatingCaptionState) => {
-  latestFloatingCaptionState = state;
-  setFloatingCaptionInteraction({
-    locked: state.locked,
-    mousePassthrough: state.mousePassthrough
-  });
+  latestFloatingCaptionContent = extractFloatingCaptionContent(state);
   sendFloatingCaptionState();
+});
+
+ipcMain.on(
+  "floating-caption:set-preferences",
+  (_event, preferences: Partial<FloatingCaptionPreferences>) => {
+    floatingCaptionPreferences = normalizeFloatingCaptionPreferences(
+      preferences,
+      floatingCaptionPreferences
+    );
+    setFloatingCaptionInteraction(floatingCaptionPreferences);
+    sendFloatingCaptionState();
+  }
+);
+
+ipcMain.on("floating-caption:set-mouse-ignore", (_event, ignore: boolean) => {
+  setFloatingCaptionMouseIgnore(Boolean(ignore));
+});
+
+ipcMain.on("floating-caption:command", (_event, command: FloatingCaptionCommand) => {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+
+  mainWindow.webContents.send("floating-caption:command", command);
+});
+
+ipcMain.on("floating-caption:resize", (_event, contentHeight: number) => {
+  const window = floatingCaptionWindow;
+
+  if (!window || window.isDestroyed()) {
+    return;
+  }
+
+  const bounds = window.getBounds();
+  const next = resolveFloatingHeight({
+    contentHeight,
+    bounds,
+    workArea: getFloatingWindowWorkArea(window)
+  });
+
+  if (next.height === bounds.height && next.y === bounds.y) {
+    return;
+  }
+
+  window.setBounds(next);
+});
+
+ipcMain.handle("floating-caption:adjust-width", (_event, delta: number) => {
+  const window = floatingCaptionWindow;
+
+  if (!window || window.isDestroyed()) {
+    return { visible: false };
+  }
+
+  const bounds = window.getBounds();
+  const next = resolveFloatingWidth({
+    delta,
+    bounds,
+    workArea: getFloatingWindowWorkArea(window)
+  });
+
+  if (next.width !== bounds.width || next.x !== bounds.x) {
+    window.setBounds(next);
+  }
+
+  return {
+    visible: true,
+    bounds: window.getBounds()
+  };
 });
 
 ipcMain.handle("ai:get-runtime-config", () => getAiRuntimeConfig());

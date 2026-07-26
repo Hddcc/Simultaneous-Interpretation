@@ -15,13 +15,23 @@ declare global {
 
   type FloatingCaptionLayout = "compact" | "standard" | "wide";
   type FloatingCaptionPosition = "top-left" | "top-right" | "bottom-left" | "bottom-right";
+  type FloatingCaptionBackdrop = "none" | "soft" | "solid";
+  type FloatingCaptionCommand = "toggle-session";
 
   interface FloatingCaptionOptions {
     layout: FloatingCaptionLayout;
     position: FloatingCaptionPosition;
   }
 
-  interface FloatingCaptionState {
+  interface FloatingCaptionPreferences {
+    locked: boolean;
+    mousePassthrough: boolean;
+    backdrop: FloatingCaptionBackdrop;
+    opacity: number;
+    fontScale: number;
+  }
+
+  interface FloatingCaptionState extends FloatingCaptionPreferences {
     translatedText: string;
     sourceText: string;
     previousText: string | null;
@@ -32,10 +42,7 @@ declare global {
     sessionStatus: string;
     latencyLabel: string;
     revised: boolean;
-    locked: boolean;
-    mousePassthrough: boolean;
-    opacity: number;
-    fontScale: number;
+    running: boolean;
     controlsVisible: boolean;
     updatedAtMs: number;
   }
@@ -318,6 +325,16 @@ declare global {
         }
       ) => Promise<FloatingCaptionWindowResult>;
       resetFloatingCaption: () => Promise<FloatingCaptionWindowResult>;
+      setFloatingCaptionPreferences: (
+        preferences: Partial<FloatingCaptionPreferences>
+      ) => void;
+      setFloatingCaptionMouseIgnore: (ignore: boolean) => void;
+      resizeFloatingCaption: (contentHeight: number) => void;
+      adjustFloatingCaptionWidth: (delta: number) => Promise<FloatingCaptionWindowResult>;
+      sendFloatingCaptionCommand: (command: FloatingCaptionCommand) => void;
+      onFloatingCaptionCommand: (
+        callback: (command: FloatingCaptionCommand) => void
+      ) => () => void;
       getAiRuntimeConfig: () => Promise<AiRuntimeConfig>;
       getProviderHealth: () => Promise<ProviderHealth>;
       startRealtimeProviderSession: (

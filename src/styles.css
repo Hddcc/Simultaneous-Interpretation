@@ -54,49 +54,47 @@ p {
   overflow-wrap: anywhere;
 }
 
-.floating-caption-shell {
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
-  align-content: center;
-  gap: 10px;
-  width: 100vw;
-  height: 100vh;
+/* Floating lyric overlay: transparent window, no background plate by default.
+   Height collapses to the caption so the main process can fit the window to it, and
+   overflow stays hidden so a caption mid-resize never flashes a scrollbar. */
+.floating-window,
+.floating-window body,
+.floating-window #root {
+  width: 100%;
+  min-width: 0;
+  height: auto;
   min-height: 0;
   overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  border-radius: 8px;
-  padding: 10px 18px 14px;
+  background: transparent;
+}
+
+.floating-caption-shell {
+  display: grid;
+  grid-template-rows: auto auto auto;
+  gap: 8px;
+  width: 100%;
+  border-radius: 12px;
+  padding: 8px 18px 14px;
   color: #f8fafc;
-  background:
-    linear-gradient(180deg, rgba(39, 32, 20, 0.96), rgba(17, 13, 9, var(--floating-opacity, 0.92))),
-    rgba(17, 13, 9, var(--floating-opacity, 0.92));
-  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.34);
+  background: transparent;
   -webkit-app-region: drag;
   user-select: none;
 }
 
-.floating-revised {
-  border-color: rgba(250, 204, 21, 0.55);
+.floating-backdrop-soft {
+  background: rgba(9, 9, 11, calc(var(--floating-opacity, 0.92) * 0.28));
+  backdrop-filter: blur(2px);
 }
 
-.floating-warning {
-  border-color: rgba(245, 158, 11, 0.7);
-  background:
-    linear-gradient(180deg, rgba(51, 34, 14, 0.96), rgba(20, 13, 4, var(--floating-opacity, 0.92))),
-    rgba(20, 13, 4, var(--floating-opacity, 0.92));
-}
-
-.floating-error {
-  border-color: rgba(248, 113, 113, 0.78);
-  background:
-    linear-gradient(180deg, rgba(51, 16, 16, 0.96), rgba(24, 8, 8, var(--floating-opacity, 0.92))),
-    rgba(24, 8, 8, var(--floating-opacity, 0.92));
+.floating-backdrop-solid {
+  background: rgba(9, 9, 11, calc(var(--floating-opacity, 0.92) * 0.86));
 }
 
 .floating-controls {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
-  gap: 6px;
+  gap: 5px;
   min-width: 0;
   opacity: 0;
   transform: translateY(-4px);
@@ -118,18 +116,53 @@ p {
 }
 
 .floating-controls button {
-  min-height: 26px;
-  border: 1px solid rgba(255, 255, 255, 0.16);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 26px;
+  min-height: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
   border-radius: 999px;
-  padding: 0 9px;
+  padding: 0 8px;
   color: #f8fafc;
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(9, 9, 11, 0.62);
   font-size: 12px;
   font-weight: 850;
 }
 
 .floating-controls button:hover {
-  background: rgba(255, 255, 255, 0.16);
+  background: rgba(39, 39, 42, 0.86);
+}
+
+.floating-primary-control {
+  border-color: rgba(250, 204, 21, 0.6);
+  color: #fde68a;
+}
+
+/* Locked overlays swallow the control bar, so a single chip fades in on hover to
+   give the mouse-passthrough state a way back out. */
+.floating-unlock-chip {
+  position: fixed;
+  top: 6px;
+  right: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 999px;
+  color: #fde68a;
+  background: rgba(9, 9, 11, 0.72);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 160ms ease;
+  -webkit-app-region: no-drag;
+}
+
+.floating-unlock-chip-visible {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .floating-caption-top,
@@ -139,17 +172,36 @@ p {
   gap: 12px;
   min-width: 0;
   color: #facc15;
+  text-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.95),
+    0 0 6px rgba(0, 0, 0, 0.75);
   font-size: 12px;
   font-weight: 850;
+  paint-order: stroke fill;
+  -webkit-text-stroke: 1.6px rgba(0, 0, 0, 0.8);
 }
 
+.floating-warning .floating-caption-top span:first-child {
+  color: #fbbf24;
+}
+
+.floating-error .floating-caption-top span:first-child {
+  color: #fca5a5;
+}
+
+.floating-revised .floating-caption-top span:first-child {
+  color: #fef08a;
+}
+
+/* Top-anchored so the first line stays put as later lines arrive; centering would
+   slide the whole cue upward on every new line. */
 .floating-caption-lines {
   display: grid;
-  align-content: center;
-  gap: clamp(5px, 1.6vh, 9px);
+  align-content: start;
+  /* Deliberately not vh-based: the window height is driven by this block's height, so
+     a viewport-relative gap would feed its own resize back into the measurement. */
+  gap: 7px;
   min-width: 0;
-  min-height: 0;
-  overflow: hidden;
 }
 
 .floating-caption-top span,
@@ -160,48 +212,66 @@ p {
   white-space: nowrap;
 }
 
+/* Text wraps to as many lines as the current sentence needs; the window height
+   follows. The line clamps are only a last-resort guard against a scrollbar. */
 .floating-source,
 .floating-previous,
 .floating-translation {
+  display: -webkit-box;
   margin: 0;
+  overflow: hidden;
   letter-spacing: 0;
   overflow-wrap: anywhere;
   word-break: break-word;
-  display: -webkit-box;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  paint-order: stroke fill;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 1;
 }
 
+/* With paint-order the fill covers the inner half of the stroke, so these widths
+   read as roughly half as thick. They are sized to stay legible on a white desktop,
+   which is the hard case once the background plate is gone. */
+/* Each row reserves a fixed number of lines (min-height = line-height x lines) so a
+   growing translation fills reserved space instead of resizing the window. On a
+   transparent overlay the unused rows are invisible, so the reserve costs nothing. */
 .floating-previous {
-  color: #94a3b8;
-  display: -webkit-box;
-  max-height: 2.8em;
-  overflow: hidden;
+  color: #cbd5e1;
+  min-height: 1.4em;
+  text-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.95),
+    0 0 8px rgba(0, 0, 0, 0.7);
   font-size: calc(clamp(12px, 2.8vw, 15px) * var(--floating-font-scale, 1));
-  font-weight: 750;
+  font-weight: 800;
   line-height: 1.4;
-  opacity: 0.82;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  opacity: 0.62;
+  -webkit-line-clamp: 1;
+  -webkit-text-stroke: 1.4px rgba(0, 0, 0, 0.78);
 }
 
 .floating-source {
-  color: #cbd5e1;
-  max-height: 1.5em;
+  color: #f1f5f9;
+  min-height: 2.64em;
+  text-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.96),
+    0 0 10px rgba(0, 0, 0, 0.72);
   font-size: calc(clamp(15px, 3.6vw, 24px) * var(--floating-font-scale, 1));
-  font-weight: 760;
-  line-height: 1.28;
+  font-weight: 800;
+  line-height: 1.32;
+  -webkit-line-clamp: 4;
+  -webkit-text-stroke: 2px rgba(0, 0, 0, 0.82);
 }
 
 .floating-translation {
   color: #ffffff;
-  max-height: 1.35em;
-  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.36);
+  min-height: 3.78em;
+  text-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.98),
+    0 2px 12px rgba(0, 0, 0, 0.78),
+    0 0 22px rgba(0, 0, 0, 0.5);
   font-size: calc(clamp(20px, 5.8vw, 34px) * var(--floating-font-scale, 1));
   font-weight: 900;
-  line-height: 1.18;
+  line-height: 1.26;
+  -webkit-line-clamp: 8;
+  -webkit-text-stroke: 3px rgba(0, 0, 0, 0.86);
 }
 
 /* Concise main window */
