@@ -10,6 +10,7 @@ export interface HistoryRecord {
   targetLanguage: string;
   sourceText: string;
   translatedText: string;
+  translationAvailable?: boolean;
   startedAtMs: number;
   endedAtMs: number;
   updatedAtMs: number;
@@ -27,6 +28,7 @@ export interface HistoryGroup {
   endedAtMs: number;
   sourceText: string;
   translatedText: string;
+  translationAvailable: boolean;
   revised: boolean;
   records: HistoryRecord[];
 }

@@ -93,11 +93,35 @@ interface TranslateTextRequest {
 }
 
 interface TranslateTextResponse {
+  ok?: true;
   text: string;
   provider: "openai" | "deepseek" | "aliyun" | "custom";
   model: string;
   latencyMs: number;
 }
+
+type TranslationFailureCategory =
+  | "provider"
+  | "network"
+  | "invalid-response"
+  | "untranslated-output"
+  | "cancelled";
+
+interface TranslateTextFailureResponse {
+  ok: false;
+  text: "";
+  provider: "openai" | "deepseek" | "aliyun" | "custom";
+  model: string;
+  latencyMs: number;
+  failure: {
+    category: TranslationFailureCategory;
+    message: string;
+    httpStatus: number | null;
+    providerCode: string | null;
+  };
+}
+
+type TranslateTextResult = TranslateTextResponse | TranslateTextFailureResponse;
 
 interface TranslationDraftResponse extends TranslateTextResponse {
   requestId: string;
@@ -142,6 +166,7 @@ interface TranscribeLocalMediaFileResponse {
 interface OpenAiErrorResponse {
   error?: {
     message?: string;
+    code?: string;
   };
 }
 
@@ -277,6 +302,69 @@ function readOpenAiError(payload: OpenAiErrorResponse): string {
   return payload.error?.message || "OpenAI 请求失败。";
 }
 
+class TranslationProviderError extends Error {
+  constructor(
+    message: string,
+    readonly httpStatus: number | null,
+    readonly providerCode: string | null,
+    readonly category: TranslationFailureCategory = "provider"
+  ) {
+    super(message);
+    this.name = "TranslationProviderError";
+  }
+}
+
+function createProviderRequestError(
+  response: Response,
+  payload: OpenAiErrorResponse
+): TranslationProviderError {
+  return new TranslationProviderError(
+    readOpenAiError(payload),
+    response.status,
+    payload.error?.code ?? null
+  );
+}
+
+function sanitizeTranslationErrorMessage(message: string): string {
+  return message
+    .replace(/\bsk-[A-Za-z0-9_-]+\b/g, "[redacted]")
+    .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
+    .replace(/\bAuthorization\s*[:=]\s*\S+/gi, "Authorization: [redacted]");
+}
+
+function createTranslationFailureResponse(
+  request: TranslateTextRequest,
+  error: unknown,
+  startedAtMs: number,
+  cancelled: boolean
+): TranslateTextFailureResponse {
+  const runtimeConfig = getAiRuntimeConfig();
+  const provider =
+    runtimeConfig.translationProvider === "mock"
+      ? "custom"
+      : runtimeConfig.translationProvider;
+  const typed = error instanceof TranslationProviderError ? error : null;
+  const category: TranslationFailureCategory = cancelled
+    ? "cancelled"
+    : typed?.category ?? (error instanceof SyntaxError ? "invalid-response" : "network");
+  const rawMessage =
+    error instanceof Error ? error.message : cancelled ? "translation request aborted" : "翻译服务调用失败。";
+
+  return {
+    ok: false,
+    text: "",
+    provider,
+    model: request.model || runtimeConfig.translationModel,
+    latencyMs: Date.now() - startedAtMs,
+    failure: {
+      category,
+      message: sanitizeTranslationErrorMessage(rawMessage),
+      httpStatus: typed?.httpStatus ?? null,
+      providerCode: typed?.providerCode ?? null
+    }
+  };
+}
+
 function readOpenAiOutputText(payload: OpenAiResponseOutput): string {
   if (payload.output_text) {
     return payload.output_text.trim();
@@ -364,7 +452,7 @@ async function translateWithOpenAi(
   const payload = (await response.json()) as OpenAiResponseOutput & OpenAiErrorResponse;
 
   if (!response.ok) {
-    throw new Error(readOpenAiError(payload));
+    throw createProviderRequestError(response, payload);
   }
 
   return {
@@ -483,7 +571,7 @@ async function translateWithOpenAiCompatible(
   const payload = (await response.json()) as ChatCompletionOutput & OpenAiErrorResponse;
 
   if (!response.ok) {
-    throw new Error(readOpenAiError(payload));
+    throw createProviderRequestError(response, payload);
   }
 
   return {
@@ -1023,19 +1111,7 @@ ipcMain.handle("ai:translate-text", async (ipcEvent, request: TranslateTextReque
       }
     });
   } catch (error) {
-    if (controller.signal.aborted) {
-      const runtimeConfig = getAiRuntimeConfig();
-      return {
-        text: request.text,
-        provider:
-          runtimeConfig.translationProvider === "mock"
-            ? "custom"
-            : runtimeConfig.translationProvider,
-        model: request.model || runtimeConfig.translationModel,
-        latencyMs: Date.now() - startedAtMs
-      } satisfies TranslateTextResponse;
-    }
-    throw error;
+    return createTranslationFailureResponse(request, error, startedAtMs, controller.signal.aborted);
   } finally {
     if (request.requestId) {
       translationControllers.delete(request.requestId);

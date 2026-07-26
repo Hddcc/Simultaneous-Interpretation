@@ -9,7 +9,7 @@ function segment(translatedText: string): SubtitleSegment {
     translatedText,
     sourceLanguage: "英语",
     targetLanguage: "中文",
-    status: "partial",
+    status: "final",
     revision: 1,
     revisionReason: "initial",
     revisionProvenance: "initial",
@@ -53,6 +53,10 @@ const records = toHistoryRecords([segment("对许多人来说。")], context);
 assert.equal(records.length, 1);
 assert.equal(records[0].id, "session-a:2:segment-1");
 assert.equal(records[0].translatedText, "对许多人来说。");
-assert.deepEqual(toHistoryRecords([segment("   ")], context), []);
+assert.equal(records[0].translationAvailable, true);
+const unavailable = toHistoryRecords([segment("   ")], context);
+assert.equal(unavailable.length, 1);
+assert.equal(unavailable[0].translatedText, "   ");
+assert.equal(unavailable[0].translationAvailable, false);
 
 console.log("history projection checks passed");

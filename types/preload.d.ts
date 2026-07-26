@@ -88,11 +88,37 @@ declare global {
   }
 
   interface TranslateTextResponse {
+    ok?: true;
     text: string;
     provider: "openai" | "deepseek" | "aliyun" | "custom";
     model: string;
     latencyMs: number;
   }
+
+  type TranslationFailureCategory =
+    | "provider"
+    | "network"
+    | "invalid-response"
+    | "untranslated-output"
+    | "cancelled";
+
+  interface TranslationFailureMetadata {
+    category: TranslationFailureCategory;
+    message: string;
+    httpStatus: number | null;
+    providerCode: string | null;
+  }
+
+  interface TranslateTextFailureResponse {
+    ok: false;
+    text: "";
+    provider: "openai" | "deepseek" | "aliyun" | "custom";
+    model: string;
+    latencyMs: number;
+    failure: TranslationFailureMetadata;
+  }
+
+  type TranslateTextResult = TranslateTextResponse | TranslateTextFailureResponse;
 
   interface TranslationDraftResponse extends TranslateTextResponse {
     requestId: string;
@@ -308,7 +334,7 @@ declare global {
         callback: (event: RealtimeProviderAsrEvent) => void
       ) => () => void;
       stopRealtimeProviderSession: () => Promise<ProviderHealth>;
-      translateText: (request: TranslateTextRequest) => Promise<TranslateTextResponse>;
+      translateText: (request: TranslateTextRequest) => Promise<TranslateTextResult>;
       cancelTranslation: (requestId: string) => void;
       onTranslationDraft: (
         callback: (event: TranslationDraftResponse) => void

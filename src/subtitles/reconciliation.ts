@@ -157,6 +157,7 @@ export function reconcileSubtitleSegments(
     );
     const revision = existing ? existing.revision + 1 : Math.max(1, event.revision);
     const status = asrSegment.status === "final" ? "final" : "partial";
+    const hasValidTranslation = !event.error && Boolean(event.translatedText.trim());
     const timing = {
       audioEvidenceEndAtMs:
         existing?.audioEvidenceEndAtMs ?? event.audioEvidenceEndAtMs ?? asrSegment.audioEvidenceEndAtMs,
@@ -167,10 +168,14 @@ export function reconcileSubtitleSegments(
       translationRequestedAtMs:
         existing?.translationRequestedAtMs ?? event.translationRequestedAtMs ?? null,
       firstDraftReceivedAtMs:
-        existing?.firstDraftReceivedAtMs ?? event.firstDraftReceivedAtMs ?? null,
+        existing?.firstDraftReceivedAtMs ??
+        (hasValidTranslation ? event.firstDraftReceivedAtMs ?? null : null),
       firstDraftVisibleAtMs:
-        existing?.firstDraftVisibleAtMs ?? event.firstDraftVisibleAtMs ?? null,
-      finalVisibleAtMs: event.finalVisibleAtMs ?? existing?.finalVisibleAtMs ?? null,
+        existing?.firstDraftVisibleAtMs ??
+        (hasValidTranslation ? event.firstDraftVisibleAtMs ?? null : null),
+      finalVisibleAtMs: hasValidTranslation
+        ? event.finalVisibleAtMs ?? existing?.finalVisibleAtMs ?? null
+        : existing?.finalVisibleAtMs ?? null,
       refinementVisibleAtMs: existing?.refinementVisibleAtMs ?? null
     };
     const latency = calculateRealtimeLatencies(timing);
@@ -178,7 +183,7 @@ export function reconcileSubtitleSegments(
     byId.set(event.segmentId, {
       id: event.segmentId,
       sourceText: event.sourceText,
-      translatedText: event.translatedText,
+      translatedText: hasValidTranslation ? event.translatedText : existing?.translatedText ?? "",
       sourceLanguage: event.sourceLanguage,
       targetLanguage: event.targetLanguage,
       status,
@@ -197,6 +202,8 @@ export function reconcileSubtitleSegments(
       translationModel: event.model,
       translationError: event.error,
       translationFallback: event.fallback,
+      translationFailure: event.failure ?? null,
+      translationAttempt: event.attempt ?? "initial",
       ...timing,
       fastDraftLatencyMs: latency.fastDraftMs,
       endToEndLatencyMs: latency.endToEndMs,
@@ -222,7 +229,7 @@ export function reconcileSubtitleSegments(
       currentIndex >= 0 &&
       (currentIndex < input.revisionWindow || existing.historyBackfill);
 
-    if (!existing || !withinRevisionWindow) {
+    if (!existing || !withinRevisionWindow || !existing.translatedText.trim() || existing.translationError) {
       return;
     }
 

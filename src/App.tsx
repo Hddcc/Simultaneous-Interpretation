@@ -52,6 +52,13 @@ import { createTranslationClient } from "./translation/client";
 import { createSubtitleRefinementClient } from "./translation/refinementClient";
 import { createSubtitleRefinementScheduler } from "./translation/refinementScheduler";
 import { createLowLatencyTranslationScheduler } from "./translation/scheduler";
+import {
+  applyTranslationEventToIssues,
+  getLatestTranslationIssue,
+  getTranslatedCaptionText,
+  getTranslationIssueLabel,
+  type TranslationIssues
+} from "./translation/issues";
 import type { SubtitleRefinementEvent, SubtitleSegment, TranslationEvent } from "./translation/types";
 import type { TtsQueueItem, TtsSessionState } from "./tts/types";
 import type {
@@ -355,6 +362,7 @@ export function App() {
   const [asrEvents, setAsrEvents] = useState<AsrEvent[]>([]);
   const [asrSegments, setAsrSegments] = useState<AsrSegment[]>([]);
   const [translationEvents, setTranslationEvents] = useState<TranslationEvent[]>([]);
+  const [translationIssues, setTranslationIssues] = useState<TranslationIssues>({});
   const [refinementEvents, setRefinementEvents] = useState<SubtitleRefinementEvent[]>([]);
   const [subtitleSegments, setSubtitleSegments] = useState<SubtitleSegment[]>([]);
   const [captionCueSnapshot, setCaptionCueSnapshot] =
@@ -482,14 +490,25 @@ export function App() {
         .slice(0, 3),
     [historyGroups, latestSubtitleSegment?.id]
   );
+  const activeTranslationIssue = getLatestTranslationIssue(
+    translationIssues,
+    activeCue?.id ?? latestAsrSegment?.id
+  );
+  const translationIssueLabel = getTranslationIssueLabel(activeTranslationIssue);
 
   const floatingCaptionState = useMemo<FloatingCaptionState>(
     () => ({
-      translatedText:
-        activeCue?.translatedText ||
-        (activeCue?.sourceText ? "正在生成译文" : latestAsrSegment ? "正在等待稳定片段生成译文" : "等待字幕"),
+      translatedText: getTranslatedCaptionText(
+        activeCue?.translatedText,
+        activeTranslationIssue,
+        activeCue?.sourceText
+          ? "正在生成译文"
+          : latestAsrSegment
+            ? "正在等待稳定片段生成译文"
+            : "等待字幕"
+      ),
       sourceText: activeCue?.sourceText ?? latestAsrSegment?.text ?? selectedSource.description,
-      previousText: previousCue ? previousCue.translatedText || previousCue.sourceText : null,
+      previousText: previousCue ? previousCue.translatedText || "译文暂不可用" : null,
       statusLabel: activeCue
         ? activeCue.revised
           ? "字幕已修订"
@@ -497,8 +516,12 @@ export function App() {
             ? "正在听译"
             : "实时字幕"
         : liveExperience.label,
-      compactStatusLabel: liveExperience.compactLabel,
-      severity: liveExperience.severity,
+      compactStatusLabel: translationIssueLabel ?? liveExperience.compactLabel,
+      severity: activeTranslationIssue
+        ? activeTranslationIssue.recoveryPending
+          ? "warning"
+          : "error"
+        : liveExperience.severity,
       languageDirection: activeLanguagePair.label,
       sessionStatus: liveExperience.label,
       latencyLabel: activeCue?.latency.totalLatencyMs !== null && activeCue?.latency.totalLatencyMs !== undefined
@@ -516,12 +539,14 @@ export function App() {
     }),
     [
       activeLanguagePair.label,
+      activeTranslationIssue,
       activeCue,
       latestAsrEvent,
       latestAsrSegment,
       liveExperience,
       previousCue,
       selectedSource.description,
+      translationIssueLabel,
     ]
   );
 
@@ -1010,7 +1035,8 @@ export function App() {
           context: getSubtitleContextItems(subtitleSegmentsRef.current, 3),
           nowMs: Date.now(),
           lane,
-          onDraft: (event) => commitTranslationEvent(segment, event)
+          onDraft: (event) => commitTranslationEvent(segment, event),
+          onRecovery: (event) => commitTranslationEvent(segment, event)
         })
         .then((event) => {
           if (event) {
@@ -1018,10 +1044,36 @@ export function App() {
           }
         })
         .catch((error) => {
-          setSession((current) => ({
-            ...current,
-            error: `翻译服务：${error instanceof Error ? error.message : "请求失败"}`
-          }));
+          if (error instanceof Error && error.name === "AbortError") return;
+          const createdAtMs = Date.now();
+          const message = error instanceof Error ? error.message : "请求失败";
+          setTranslationIssues((current) =>
+            applyTranslationEventToIssues(current, {
+              id: `translation-${segment.id}-${segment.revision}-unexpected-failure`,
+              segmentId: segment.id,
+              sourceText: segment.text,
+              translatedText: "",
+              languagePairId: languagePairRef.current.id,
+              sourceLanguage: languagePairRef.current.source.label,
+              targetLanguage: languagePairRef.current.target.label,
+              status: segment.status === "final" ? "translated" : "partial",
+              revision: segment.revision,
+              revisionReason: "translation-correction",
+              createdAtMs,
+              latencyMs: 0,
+              contextSize: 0,
+              provider: providerHealthRef.current?.config.translationProvider ?? "mock",
+              model: languagePairRef.current.translationModel,
+              error: message,
+              fallback: true,
+              failure: {
+                category: "network",
+                message,
+                httpStatus: null,
+                providerCode: null
+              }
+            })
+          );
         });
     });
   }
@@ -1045,12 +1097,15 @@ export function App() {
   }
 
   function commitTranslationEvent(segment: AsrSegment, event: TranslationEvent): void {
-    const firstDraftVisibleAtMs = Date.now();
+    const hasVisibleTranslation = !event.error && Boolean(event.translatedText.trim());
+    const firstDraftVisibleAtMs = hasVisibleTranslation ? Date.now() : null;
     const visibleEvent: TranslationEvent = {
       ...event,
-      firstDraftVisibleAtMs: event.firstDraftVisibleAtMs ?? firstDraftVisibleAtMs,
+      firstDraftVisibleAtMs: hasVisibleTranslation
+        ? event.firstDraftVisibleAtMs ?? firstDraftVisibleAtMs
+        : event.firstDraftVisibleAtMs ?? null,
       finalVisibleAtMs:
-        segment.status === "final" && event.complete !== false
+        hasVisibleTranslation && segment.status === "final" && event.complete !== false
           ? event.finalVisibleAtMs ?? firstDraftVisibleAtMs
           : event.finalVisibleAtMs ?? null
     };
@@ -1072,12 +1127,7 @@ export function App() {
     referenceLatencyRunnerRef.current.recordSample(latencySample);
 
     setTranslationEvents((current) => [visibleEvent, ...current].slice(0, 8));
-    if (visibleEvent.error) {
-      setSession((current) => ({
-        ...current,
-        error: `翻译服务：${visibleEvent.error}`
-      }));
-    }
+    setTranslationIssues((current) => applyTranslationEventToIssues(current, visibleEvent));
 
     const { segments: nextSegments } = reconcileSubtitleSegments({
       current: subtitleSegmentsRef.current,
@@ -1088,7 +1138,9 @@ export function App() {
     });
     commitSubtitleSegments(nextSegments);
     if (!visibleEvent.historyBackfill) {
-      translationSchedulerRef.current.markVisible(segment.id, firstDraftVisibleAtMs, segment.updatedAtMs);
+      if (hasVisibleTranslation && firstDraftVisibleAtMs !== null) {
+        translationSchedulerRef.current.markVisible(segment.id, firstDraftVisibleAtMs, segment.updatedAtMs);
+      }
       syncCaptionCueSnapshot([segment], [visibleEvent]);
     }
     updateRefinementPressure();
@@ -1315,6 +1367,7 @@ export function App() {
     setAsrEvents([]);
     setAsrSegments([]);
     setTranslationEvents([]);
+    setTranslationIssues({});
     setRefinementEvents([]);
     setSubtitleSegments([]);
     setCaptionCueSnapshot(emptyCaptionCueSnapshot);
@@ -2130,7 +2183,7 @@ export function App() {
       <section className="caption-stage" aria-live="polite" aria-label="当前字幕">
         <div className="recent-context" aria-label="最近上下文">
           {recentContextGroups.map((group) => (
-            <p key={group.id}>{group.translatedText || group.sourceText}</p>
+            <p key={group.id}>{group.translatedText || "译文暂不可用"}</p>
           ))}
         </div>
         <div className="current-caption">
@@ -2142,6 +2195,7 @@ export function App() {
           </div>
         </div>
         {session.error ? <p className="inline-error" role="alert">{session.error}</p> : null}
+        {translationIssueLabel ? <p className="inline-error" role="alert">{translationIssueLabel}</p> : null}
       </section>
 
       {historyExpanded ? (
@@ -2176,7 +2230,10 @@ export function App() {
                   {group.revised ? <span>已修订</span> : null}
                 </div>
                 <p className="history-source">{group.sourceText}</p>
-                <p className="history-translation">{group.translatedText}</p>
+                <p className="history-translation">
+                  {group.translatedText}
+                  {!group.translationAvailable ? `${group.translatedText ? " " : ""}译文暂不可用` : null}
+                </p>
               </article>
             ))}
           </div>

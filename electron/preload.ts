@@ -65,11 +65,28 @@ interface TranslateTextRequest {
 }
 
 interface TranslateTextResponse {
+  ok?: true;
   text: string;
   provider: "openai" | "deepseek" | "aliyun" | "custom";
   model: string;
   latencyMs: number;
 }
+
+interface TranslateTextFailureResponse {
+  ok: false;
+  text: "";
+  provider: "openai" | "deepseek" | "aliyun" | "custom";
+  model: string;
+  latencyMs: number;
+  failure: {
+    category: "provider" | "network" | "invalid-response" | "untranslated-output" | "cancelled";
+    message: string;
+    httpStatus: number | null;
+    providerCode: string | null;
+  };
+}
+
+type TranslateTextResult = TranslateTextResponse | TranslateTextFailureResponse;
 
 interface TranslationDraftResponse extends TranslateTextResponse {
   requestId: string;

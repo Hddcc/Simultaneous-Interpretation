@@ -29,7 +29,23 @@ export interface TranslationRequest {
   translationRequestedAtMs?: number;
   signal?: AbortSignal;
   lane?: "active" | "backfill";
+  attempt?: TranslationAttempt;
   onDraft?: (event: TranslationEvent) => void;
+}
+
+export type TranslationAttempt = "initial" | "final-recovery";
+export type TranslationFailureCategory =
+  | "provider"
+  | "network"
+  | "invalid-response"
+  | "untranslated-output"
+  | "cancelled";
+
+export interface TranslationFailureMetadata {
+  category: TranslationFailureCategory;
+  message: string;
+  httpStatus: number | null;
+  providerCode: string | null;
 }
 
 export interface RealtimePipelineTiming {
@@ -61,6 +77,9 @@ export interface TranslationEvent extends RealtimePipelineTiming {
   model: string;
   error: string | null;
   fallback: boolean;
+  failure?: TranslationFailureMetadata | null;
+  attempt?: TranslationAttempt;
+  recoveryScheduled?: boolean;
   lane?: "active" | "backfill";
   historyBackfill?: boolean;
   streaming?: boolean;
@@ -99,6 +118,8 @@ export interface SubtitleSegment {
   translationModel: string;
   translationError: string | null;
   translationFallback: boolean;
+  translationFailure?: TranslationFailureMetadata | null;
+  translationAttempt?: TranslationAttempt;
   refinementProvider?: RefinementProvider | null;
   refinementModel?: string | null;
   refinementLatencyMs?: number | null;

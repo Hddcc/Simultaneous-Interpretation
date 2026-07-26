@@ -14,7 +14,7 @@ export function toHistoryRecords(
   context: HistoryProjectionContext
 ): HistoryRecord[] {
   return segments
-    .filter((segment) => segment.translatedText.trim())
+    .filter((segment) => segment.status !== "partial")
     .slice(0, 6)
     .map((segment) => {
       const segmentId = `${context.captureEpoch}:${segment.id}`;
@@ -28,6 +28,7 @@ export function toHistoryRecords(
         targetLanguage: segment.targetLanguage,
         sourceText: segment.sourceText,
         translatedText: segment.translatedText,
+        translationAvailable: Boolean(segment.translatedText.trim()),
         startedAtMs: segment.startedAtMs,
         endedAtMs: segment.endedAtMs,
         updatedAtMs: segment.updatedAtMs,

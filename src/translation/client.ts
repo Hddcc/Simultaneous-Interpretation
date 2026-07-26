@@ -1,4 +1,10 @@
-import type { TranslationClient, TranslationEvent, TranslationRequest } from "./types";
+import type {
+  TranslationClient,
+  TranslationEvent,
+  TranslationFailureMetadata,
+  TranslationRequest
+} from "./types";
+import { validateTranslationText } from "./validation";
 
 type TranslationProvider = TranslationEvent["provider"];
 
@@ -7,6 +13,7 @@ interface TranslationMetadata {
   model: string;
   error: string | null;
   fallback: boolean;
+  failure?: TranslationFailureMetadata | null;
 }
 
 const ENGLISH_TO_CHINESE: Record<string, string> = {
@@ -33,14 +40,10 @@ const CHINESE_TO_ENGLISH: Record<string, string> = {
 
 function createFallbackTranslation(request: TranslationRequest): string {
   if (request.languagePair.target.code === "zh-CN") {
-    return request.segment.status === "partial"
-      ? `正在整理译文：${request.segment.text}`
-      : request.segment.text;
+    return `模拟译文：${request.segment.text}`;
   }
 
-  return request.segment.status === "partial"
-    ? `Draft translation: ${request.segment.text}`
-    : request.segment.text;
+  return `Draft translation: ${request.segment.text}`;
 }
 
 function getErrorMessage(error: unknown): string {
@@ -71,7 +74,7 @@ function createBaseTranslationEvent(
         : "asr-correction";
 
   return {
-    id: `translation-${request.segment.id}-${request.segment.status}-${request.segment.revision}`,
+    id: `translation-${request.segment.id}-${request.segment.status}-${request.segment.revision}-${request.attempt ?? "initial"}`,
     segmentId: request.segment.id,
     sourceText: request.segment.text,
     translatedText,
@@ -96,6 +99,8 @@ function createBaseTranslationEvent(
     model: metadata.model,
     error: metadata.error,
     fallback: metadata.fallback,
+    failure: metadata.failure ?? null,
+    attempt: request.attempt ?? "initial",
     streaming: false,
     complete: true
   };
@@ -115,19 +120,29 @@ function createMockTranslationEvent(request: TranslationRequest): TranslationEve
   });
 }
 
-function createFallbackTranslationEvent(
+function createFailureTranslationEvent(
   request: TranslationRequest,
   latencyMs: number,
   provider: TranslationProvider,
   model: string,
-  error: unknown
+  failure: TranslationFailureMetadata
 ): TranslationEvent {
-  return createBaseTranslationEvent(request, request.segment.text, latencyMs, {
+  return createBaseTranslationEvent(request, "", latencyMs, {
     provider,
     model,
-    error: getErrorMessage(error),
-    fallback: true
+    error: failure.message,
+    fallback: true,
+    failure
   });
+}
+
+function failureFromError(error: unknown): TranslationFailureMetadata {
+  return {
+    category: error instanceof SyntaxError ? "invalid-response" : "network",
+    message: getErrorMessage(error),
+    httpStatus: null,
+    providerCode: null
+  };
 }
 
 async function getTranslationProviderHealth(): Promise<ProviderHealth | null> {
@@ -150,7 +165,7 @@ async function createProviderTranslationEvent(request: TranslationRequest): Prom
   const health = await getTranslationProviderHealth();
   throwIfAborted(request.signal);
   const provider = health?.config.translationProvider ?? "mock";
-  const fastDraft = request.lane === "active";
+  const fastDraft = request.lane === "active" && request.attempt !== "final-recovery";
   const model =
     (fastDraft ? health?.config.fastDraftModel : health?.config.translationModel) ??
     request.languagePair.translationModel;
@@ -164,12 +179,17 @@ async function createProviderTranslationEvent(request: TranslationRequest): Prom
   const requestId = `translation-${request.segment.id}-${request.segment.revision}-${startedAtMs}`;
 
   if (!api?.translateText) {
-    return createFallbackTranslationEvent(
+    return createFailureTranslationEvent(
       request,
       Date.now() - startedAtMs,
       provider,
       model,
-      new Error("当前运行环境没有暴露翻译接口。")
+      {
+        category: "invalid-response",
+        message: "当前运行环境没有暴露翻译接口。",
+        httpStatus: null,
+        providerCode: null
+      }
     );
   }
 
@@ -181,6 +201,9 @@ async function createProviderTranslationEvent(request: TranslationRequest): Prom
     if (stream && request.onDraft && api.onTranslationDraft) {
       unsubscribeDraft = api.onTranslationDraft((draft) => {
         if (draft.requestId !== requestId || draft.complete || request.signal?.aborted) {
+          return;
+        }
+        if (!validateTranslationText(request.segment.text, draft.text, request.languagePair).valid) {
           return;
         }
         request.onDraft?.({
@@ -210,6 +233,30 @@ async function createProviderTranslationEvent(request: TranslationRequest): Prom
     });
     throwIfAborted(request.signal);
 
+    if (response.ok === false) {
+      if (response.failure.category === "cancelled") {
+        const error = new Error(response.failure.message);
+        error.name = "AbortError";
+        throw error;
+      }
+      return createFailureTranslationEvent(
+        request,
+        response.latencyMs,
+        response.provider,
+        response.model,
+        response.failure
+      );
+    }
+
+    if (!validateTranslationText(request.segment.text, response.text, request.languagePair).valid) {
+      return createFailureTranslationEvent(request, response.latencyMs, response.provider, response.model, {
+        category: "untranslated-output",
+        message: "翻译服务返回了未转换为目标语言的文本。",
+        httpStatus: null,
+        providerCode: null
+      });
+    }
+
     return {
       ...createBaseTranslationEvent(request, response.text, response.latencyMs, {
         provider: response.provider,
@@ -225,12 +272,12 @@ async function createProviderTranslationEvent(request: TranslationRequest): Prom
       throwIfAborted(request.signal);
       throw error;
     }
-    return createFallbackTranslationEvent(
+    return createFailureTranslationEvent(
       request,
       Date.now() - startedAtMs,
       provider,
       model,
-      error
+      failureFromError(error)
     );
   } finally {
     request.signal?.removeEventListener("abort", cancel);

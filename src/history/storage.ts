@@ -25,6 +25,7 @@ function isHistoryRecord(value: unknown): value is HistoryRecord {
     typeof record.targetLanguage === "string" &&
     typeof record.sourceText === "string" &&
     typeof record.translatedText === "string" &&
+    (record.translationAvailable === undefined || typeof record.translationAvailable === "boolean") &&
     typeof record.startedAtMs === "number" &&
     Number.isFinite(record.startedAtMs) &&
     typeof record.endedAtMs === "number" &&
@@ -39,8 +40,12 @@ export function upsertHistoryRecords(
   current: HistoryRecord[],
   incoming: HistoryRecord[]
 ): HistoryRecord[] {
-  const byId = new Map(current.map((record) => [record.id, record]));
-  incoming.forEach((record) => byId.set(record.id, record));
+  const normalize = (record: HistoryRecord): HistoryRecord => ({
+    ...record,
+    translationAvailable: record.translationAvailable ?? Boolean(record.translatedText.trim())
+  });
+  const byId = new Map(current.map((record) => [record.id, normalize(record)]));
+  incoming.forEach((record) => byId.set(record.id, normalize(record)));
   return [...byId.values()]
     .sort((left, right) => right.updatedAtMs - left.updatedAtMs)
     .slice(0, HISTORY_LIMIT);
@@ -89,7 +94,9 @@ export function serializeHistoryText(groups: HistoryGroup[]): string {
     .reverse()
     .map((group) => {
       const timestamp = formatHistoryTimestamp(group.startedAtMs);
-      return `[${timestamp}]\n${group.sourceText}\n${group.translatedText}`;
+      const unavailable = group.translationAvailable ? "" : "[译文暂不可用]";
+      const translation = [group.translatedText, unavailable].filter(Boolean).join("\n");
+      return `[${timestamp}]\n${group.sourceText}\n${translation}`;
     })
     .join("\n\n");
 }
